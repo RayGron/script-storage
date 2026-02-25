@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+hr() { printf "\n%s\n" "============================================================"; }
+cmd() { command -v "$1" >/dev/null 2>&1; }
+
+total_checks=0
+pass_count=0
+fail_count=0
+skip_count=0
+compute_checks=0
+compute_pass=0
+backend_torch=0
+backend_cupy=0
+backend_opencl=0
+
+record_result() {
+  local check="$1"
+  local status="$2"
+  local details="$3"
+
+  printf "[%s] %s - %s\n" "$status" "$check" "$details"
+
+  case "$status" in
+    PASS) ((pass_count += 1)) ;;
+    FAIL) ((fail_count += 1)) ;;
+    SKIP) ((skip_count += 1)) ;;
+    *) return 0 ;;
+  esac
+
+  ((total_checks += 1))
+  if [[ "$check" == compute:* ]]; then
+    ((compute_checks += 1))
+    if [[ "$status" == "PASS" ]]; then
+      ((compute_pass += 1))
+    fi
+  fi
+}
+
+detect_python_backends() {
+  backend_torch=0
+  backend_cupy=0
+  backend_opencl=0
+
+  if ! cmd python3; then
+    return 1
+  fi
+
+  local backend_state
+  backend_state="$(python3 - <<'PY' 2>/dev/null
+import importlib
+
+def usable(name):
+    try:
+        importlib.import_module(name)
+        return 1
+    except Exception:
+        return 0
+
+print(f"torch={usable('torch')}")
+print(f"cupy={usable('cupy')}")
+print(f"pyopencl={usable('pyopencl')}")
+PY
+)"
+
+  while IFS='=' read -r name value; do
+    case "$name" in
+      torch) backend_torch="${value:-0}" ;;
+      cupy) backend_cupy="${value:-0}" ;;
+      pyopencl) backend_opencl="${value:-0}" ;;
+    esac
+  done <<< "$backend_state"
+  return 0
+}
+
+have_any_backend() {
+  [[ "$backend_torch" -eq 1 || "$backend_cupy" -eq 1 || "$backend_opencl" -eq 1 ]]
+}
+
+pip_ready() {
+  if python3 -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+  if python3 -m ensurepip --upgrade >/dev/null 2>&1; then
+    python3 -m pip --version >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+try_pip_install() {
+  local label="$1"
+  shift
+
+  local log_file
+  log_file="$(mktemp 2>/dev/null || echo "/tmp/gpu-test-install.log")"
+
+  if python3 -m pip install --user --upgrade "$@" >"$log_file" 2>&1; then
+    record_result "backend:install:${label}" "PASS" "Installed package(s): $*"
+    rm -f "$log_file" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local tail_line
+  tail_line="$(tail -n 1 "$log_file" 2>/dev/null || echo "pip install failed")"
+  record_result "backend:install:${label}" "SKIP" "Install attempt failed: ${tail_line}"
+  rm -f "$log_file" >/dev/null 2>&1 || true
+  return 1
+}
+
+ensure_gpu_backend() {
+  if ! cmd python3; then
+    record_result "backend:check" "SKIP" "python3 not found"
+    return 1
+  fi
+
+  if ! detect_python_backends; then
+    record_result "backend:check" "SKIP" "Unable to inspect Python modules"
+    return 1
+  fi
+
+  if have_any_backend; then
+    local present=()
+    [[ "$backend_torch" -eq 1 ]] && present+=("torch")
+    [[ "$backend_cupy" -eq 1 ]] && present+=("cupy")
+    [[ "$backend_opencl" -eq 1 ]] && present+=("pyopencl")
+    record_result "backend:check" "PASS" "Detected Python GPU backend(s): ${present[*]}"
+    return 0
+  fi
+
+  record_result "backend:check" "SKIP" "No Python GPU backend detected. Auto-install will be attempted."
+
+  if ! pip_ready; then
+    record_result "backend:install" "FAIL" "pip is not available and could not be bootstrapped with ensurepip"
+    return 1
+  fi
+
+  local install_ok=1
+
+  # Prefer CUDA-enabled CuPy on NVIDIA hosts, then fallback to OpenCL backend.
+  if [[ "$nvidia_gpu_count" -gt 0 || "$nvidia_pci_count" -gt 0 ]]; then
+    if try_pip_install "cupy-cuda12x" cupy-cuda12x; then
+      install_ok=0
+    elif try_pip_install "cupy-cuda11x" cupy-cuda11x; then
+      install_ok=0
+    elif try_pip_install "opencl-fallback" numpy pyopencl; then
+      install_ok=0
+    fi
+  else
+    # Generic fallback for AMD/Intel/unknown setups.
+    if try_pip_install "opencl" numpy pyopencl; then
+      install_ok=0
+    fi
+  fi
+
+  detect_python_backends || true
+  if have_any_backend; then
+    local present_after=()
+    [[ "$backend_torch" -eq 1 ]] && present_after+=("torch")
+    [[ "$backend_cupy" -eq 1 ]] && present_after+=("cupy")
+    [[ "$backend_opencl" -eq 1 ]] && present_after+=("pyopencl")
+    record_result "backend:ready" "PASS" "Available backend(s) after install attempt: ${present_after[*]}"
+    return 0
+  fi
+
+  if [[ "$install_ok" -eq 0 ]]; then
+    record_result "backend:ready" "FAIL" "Packages were installed but no GPU backend is importable"
+  else
+    record_result "backend:ready" "FAIL" "Unable to install a usable Python GPU backend"
+  fi
+  return 1
+}
+
+pci_gpu_count=0
+nvidia_pci_count=0
+amd_pci_count=0
+intel_pci_count=0
+nvidia_gpu_count=0
+amd_gpu_count=0
+detected_gpu_count=0
+
+echo "Host: $(hostname -f 2>/dev/null || hostname)"
+echo "Date: $(date -Is)"
+
+hr
+echo "[GPU Inventory]"
+
+pci_lines=""
+if cmd lspci; then
+  pci_lines="$(lspci -nn | grep -Ei 'vga|3d|display' || true)"
+  if [[ -n "$pci_lines" ]]; then
+    pci_gpu_count="$(printf '%s\n' "$pci_lines" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+    nvidia_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'nvidia' || true)"
+    amd_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'amd|ati' || true)"
+    intel_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'intel' || true)"
+    record_result "inventory:pci" "PASS" "${pci_gpu_count} GPU-class PCI device(s) detected"
+    printf '%s\n' "$pci_lines"
+  else
+    record_result "inventory:pci" "FAIL" "No GPU-class PCI devices detected"
+  fi
+else
+  record_result "inventory:pci" "SKIP" "lspci not found (install pciutils)"
+fi
+
+hr
+echo "[Vendor Availability Checks]"
+
+if cmd nvidia-smi; then
+  nvidia_list="$(nvidia-smi -L 2>&1)"
+  nvidia_rc=$?
+  if [[ $nvidia_rc -eq 0 ]]; then
+    nvidia_gpu_count="$(printf '%s\n' "$nvidia_list" | grep -Ec '^GPU [0-9]+' || true)"
+    if [[ "$nvidia_gpu_count" -gt 0 ]]; then
+      record_result "availability:nvidia" "PASS" "nvidia-smi reports ${nvidia_gpu_count} GPU(s)"
+      printf '%s\n' "$nvidia_list"
+    else
+      if [[ "$nvidia_pci_count" -gt 0 ]]; then
+        record_result "availability:nvidia" "FAIL" "NVIDIA PCI devices present, but nvidia-smi lists no GPUs"
+      else
+        record_result "availability:nvidia" "SKIP" "nvidia-smi present, no NVIDIA GPUs found"
+      fi
+    fi
+  else
+    if [[ "$nvidia_pci_count" -gt 0 ]]; then
+      record_result "availability:nvidia" "FAIL" "nvidia-smi failed while NVIDIA PCI devices exist: $nvidia_list"
+    else
+      record_result "availability:nvidia" "SKIP" "nvidia-smi failed and no NVIDIA PCI devices detected"
+    fi
+  fi
+else
+  if [[ "$nvidia_pci_count" -gt 0 ]]; then
+    record_result "availability:nvidia" "FAIL" "NVIDIA PCI devices detected, but nvidia-smi is missing"
+  else
+    record_result "availability:nvidia" "SKIP" "nvidia-smi not found"
+  fi
+fi
+
+if cmd rocm-smi; then
+  rocm_smi_out="$(rocm-smi -i 2>&1)"
+  rocm_smi_rc=$?
+  if [[ $rocm_smi_rc -eq 0 ]]; then
+    amd_gpu_count="$(printf '%s\n' "$rocm_smi_out" | grep -Eo 'GPU\[[0-9]+\]' | sort -u | wc -l | tr -d ' ')"
+    if [[ "$amd_gpu_count" -gt 0 ]]; then
+      record_result "availability:amd" "PASS" "rocm-smi reports ${amd_gpu_count} GPU(s)"
+      printf '%s\n' "$rocm_smi_out"
+    else
+      if [[ "$amd_pci_count" -gt 0 ]]; then
+        record_result "availability:amd" "FAIL" "AMD/ATI PCI devices present, but rocm-smi lists no GPUs"
+      else
+        record_result "availability:amd" "SKIP" "rocm-smi present, no AMD GPUs found"
+      fi
+    fi
+  else
+    if [[ "$amd_pci_count" -gt 0 ]]; then
+      record_result "availability:amd" "FAIL" "rocm-smi failed while AMD/ATI PCI devices exist: $rocm_smi_out"
+    else
+      record_result "availability:amd" "SKIP" "rocm-smi failed and no AMD/ATI PCI devices detected"
+    fi
+  fi
+elif cmd rocminfo; then
+  rocminfo_out="$(rocminfo 2>&1)"
+  rocminfo_rc=$?
+  if [[ $rocminfo_rc -eq 0 ]]; then
+    amd_gpu_count="$(printf '%s\n' "$rocminfo_out" | grep -Eic 'Name:[[:space:]]+gfx' || true)"
+    if [[ "$amd_gpu_count" -gt 0 ]]; then
+      record_result "availability:amd" "PASS" "rocminfo reports ${amd_gpu_count} GPU agent(s)"
+    else
+      if [[ "$amd_pci_count" -gt 0 ]]; then
+        record_result "availability:amd" "FAIL" "AMD/ATI PCI devices present, but rocminfo lists no GPU agents"
+      else
+        record_result "availability:amd" "SKIP" "rocminfo present, no AMD GPU agents found"
+      fi
+    fi
+  else
+    if [[ "$amd_pci_count" -gt 0 ]]; then
+      record_result "availability:amd" "FAIL" "rocminfo failed while AMD/ATI PCI devices exist"
+    else
+      record_result "availability:amd" "SKIP" "rocminfo failed and no AMD/ATI PCI devices detected"
+    fi
+  fi
+else
+  if [[ "$amd_pci_count" -gt 0 ]]; then
+    record_result "availability:amd" "FAIL" "AMD/ATI PCI devices detected, but rocm-smi/rocminfo are missing"
+  else
+    record_result "availability:amd" "SKIP" "rocm-smi/rocminfo not found"
+  fi
+fi
+
+if [[ "$intel_pci_count" -gt 0 ]]; then
+  if compgen -G "/dev/dri/renderD*" >/dev/null; then
+    record_result "availability:intel" "PASS" "Intel GPU PCI devices present and /dev/dri/renderD* exists"
+  else
+    record_result "availability:intel" "FAIL" "Intel GPU PCI devices present, but /dev/dri/renderD* is missing"
+  fi
+else
+  record_result "availability:intel" "SKIP" "No Intel GPU-class PCI devices detected"
+fi
+
+if [[ "$pci_gpu_count" -gt 0 ]]; then
+  detected_gpu_count="$pci_gpu_count"
+else
+  detected_gpu_count=$((nvidia_gpu_count + amd_gpu_count + intel_pci_count))
+fi
+
+hr
+echo "[Compute Smoke Test]"
+
+ensure_gpu_backend || true
+
+if cmd python3; then
+  py_output="$(python3 - <<'PY'
+import time
+
+def emit(status, check, details):
+    print(f"RESULT|{status}|{check}|{details}")
+
+def test_torch():
+    try:
+        import torch
+    except Exception:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    count = torch.cuda.device_count()
+    if count <= 0:
+        return False
+
+    for i in range(count):
+        name = "unknown"
+        try:
+            name = torch.cuda.get_device_name(i)
+            torch.cuda.set_device(i)
+            a = torch.randn((512, 512), device=f"cuda:{i}")
+            b = torch.randn((512, 512), device=f"cuda:{i}")
+            t0 = time.perf_counter()
+            c = (a @ b).sum()
+            torch.cuda.synchronize(i)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            checksum = float(c.item())
+            emit("PASS", f"compute:torch:gpu{i}", f"{name}; matmul ok; checksum={checksum:.4f}; elapsed_ms={elapsed_ms:.2f}")
+        except Exception as exc:
+            emit("FAIL", f"compute:torch:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
+    emit("INFO", "compute:backend", "Using PyTorch CUDA/ROCm backend")
+    return True
+
+def test_cupy():
+    try:
+        import cupy as cp
+    except Exception:
+        return False
+    try:
+        count = cp.cuda.runtime.getDeviceCount()
+    except Exception:
+        return False
+    if count <= 0:
+        return False
+
+    for i in range(count):
+        name = "unknown"
+        try:
+            with cp.cuda.Device(i):
+                props = cp.cuda.runtime.getDeviceProperties(i)
+                raw_name = props.get("name", b"unknown")
+                if isinstance(raw_name, (bytes, bytearray)):
+                    name = raw_name.decode(errors="replace")
+                else:
+                    name = str(raw_name)
+                a = cp.random.random((512, 512), dtype=cp.float32)
+                b = cp.random.random((512, 512), dtype=cp.float32)
+                t0 = time.perf_counter()
+                c = cp.matmul(a, b)
+                checksum = float(c.sum().get())
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                emit("PASS", f"compute:cupy:gpu{i}", f"{name}; matmul ok; checksum={checksum:.4f}; elapsed_ms={elapsed_ms:.2f}")
+        except Exception as exc:
+            emit("FAIL", f"compute:cupy:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
+    emit("INFO", "compute:backend", "Using CuPy CUDA backend")
+    return True
+
+def test_opencl():
+    try:
+        import pyopencl as cl
+        import numpy as np
+    except Exception:
+        return False
+
+    try:
+        platforms = cl.get_platforms()
+    except Exception:
+        return False
+
+    gpu_devices = []
+    for platform in platforms:
+        try:
+            devices = platform.get_devices(device_type=cl.device_type.GPU)
+        except Exception:
+            devices = []
+        for dev in devices:
+            gpu_devices.append((platform, dev))
+
+    if not gpu_devices:
+        return False
+
+    n = 262144
+    host_a = np.ones(n, dtype=np.float32)
+    host_b = np.full(n, 3.0, dtype=np.float32)
+    kernel = """
+    __kernel void saxpy(__global const float* a, __global const float* b, __global float* c) {
+        int i = get_global_id(0);
+        c[i] = a[i] * 2.0f + b[i];
+    }
+    """
+
+    for i, (platform, device) in enumerate(gpu_devices):
+        name = f"{platform.name.strip()} / {device.name.strip()}"
+        try:
+            ctx = cl.Context(devices=[device])
+            queue = cl.CommandQueue(ctx)
+            mf = cl.mem_flags
+            a_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=host_a)
+            b_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=host_b)
+            c_buf = cl.Buffer(ctx, mf.WRITE_ONLY, host_a.nbytes)
+            prg = cl.Program(ctx, kernel).build()
+            t0 = time.perf_counter()
+            prg.saxpy(queue, (n,), None, a_buf, b_buf, c_buf)
+            out = np.empty_like(host_a)
+            cl.enqueue_copy(queue, out, c_buf)
+            queue.finish()
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            expected = float((host_a * 2.0 + host_b).sum())
+            checksum = float(out.sum())
+            if abs(checksum - expected) <= max(1e-3, expected * 1e-5):
+                emit("PASS", f"compute:opencl:gpu{i}", f"{name}; kernel ok; checksum={checksum:.2f}; elapsed_ms={elapsed_ms:.2f}")
+            else:
+                emit("FAIL", f"compute:opencl:gpu{i}", f"{name}; checksum mismatch: got={checksum:.2f}, expected={expected:.2f}")
+        except Exception as exc:
+            emit("FAIL", f"compute:opencl:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
+    emit("INFO", "compute:backend", "Using OpenCL backend")
+    return True
+
+backend_used = test_torch() or test_cupy() or test_opencl()
+if not backend_used:
+    emit("SKIP", "compute:backend", "No supported Python GPU backend with visible devices (PyTorch/CuPy/OpenCL)")
+PY
+)"
+  py_rc=$?
+
+  if [[ $py_rc -ne 0 ]]; then
+    record_result "compute:python" "FAIL" "python3 smoke test failed to execute"
+  else
+    while IFS='|' read -r tag status check details; do
+      [[ "$tag" == "RESULT" ]] || continue
+      if [[ "$status" == "INFO" ]]; then
+        printf "[INFO] %s - %s\n" "$check" "$details"
+      else
+        record_result "$check" "$status" "$details"
+      fi
+    done <<< "$py_output"
+  fi
+else
+  record_result "compute:python" "SKIP" "python3 not found"
+fi
+
+hr
+echo "[Summary]"
+echo "Detected GPUs (best effort): ${detected_gpu_count}"
+echo "Checks: total=${total_checks}, pass=${pass_count}, fail=${fail_count}, skip=${skip_count}"
+echo "Compute checks: ${compute_checks}, compute passes: ${compute_pass}"
+
+overall="PASS"
+reason="GPU availability and compute smoke test look healthy"
+
+if [[ "$detected_gpu_count" -eq 0 ]]; then
+  overall="FAIL"
+  reason="No GPUs detected"
+elif [[ "$compute_pass" -eq 0 ]]; then
+  overall="FAIL"
+  reason="No compute smoke test passed"
+elif [[ "$fail_count" -gt 0 ]]; then
+  overall="FAIL"
+  reason="One or more mandatory checks failed"
+fi
+
+echo "Overall: ${overall} - ${reason}"
+
+if [[ "$overall" == "PASS" ]]; then
+  exit 0
+fi
+exit 1
