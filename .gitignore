@@ -1,0 +1,16 @@
+# IDE
+.vscode/
+.idea/
+.fleet/
+.vs/
+
+# JetBrains
+*.iml
+*.ipr
+*.iws
+
+# Visual Studio
+*.suo
+*.user
+*.userossc
+*.sln.docstates
