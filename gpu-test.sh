@@ -78,14 +78,54 @@ have_any_backend() {
   [[ "$backend_torch" -eq 1 || "$backend_cupy" -eq 1 || "$backend_opencl" -eq 1 ]]
 }
 
-pip_ready() {
+ensure_pip_available() {
   if python3 -m pip --version >/dev/null 2>&1; then
+    record_result "backend:pip" "PASS" "pip is available"
     return 0
   fi
-  if python3 -m ensurepip --upgrade >/dev/null 2>&1; then
-    python3 -m pip --version >/dev/null 2>&1
-    return $?
+
+  record_result "backend:pip" "SKIP" "pip not found. Attempting bootstrap."
+
+  if python3 -m ensurepip --upgrade >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+    record_result "backend:pip" "PASS" "pip bootstrapped with ensurepip"
+    return 0
   fi
+
+  local -a sudo_cmd=()
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    if cmd sudo && sudo -n true >/dev/null 2>&1; then
+      sudo_cmd=(sudo -n)
+    else
+      record_result "backend:pip" "FAIL" "pip missing and non-interactive privilege escalation is unavailable"
+      return 1
+    fi
+  fi
+
+  if cmd apt-get; then
+    if DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get update -y >/dev/null 2>&1 \
+      && DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get install -y python3-pip >/dev/null 2>&1 \
+      && python3 -m pip --version >/dev/null 2>&1; then
+      record_result "backend:pip" "PASS" "pip installed via apt-get"
+      return 0
+    fi
+  elif cmd dnf; then
+    if "${sudo_cmd[@]}" dnf install -y python3-pip >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+      record_result "backend:pip" "PASS" "pip installed via dnf"
+      return 0
+    fi
+  elif cmd yum; then
+    if "${sudo_cmd[@]}" yum install -y python3-pip >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+      record_result "backend:pip" "PASS" "pip installed via yum"
+      return 0
+    fi
+  elif cmd apk; then
+    if "${sudo_cmd[@]}" apk add --no-cache py3-pip >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+      record_result "backend:pip" "PASS" "pip installed via apk"
+      return 0
+    fi
+  fi
+
+  record_result "backend:pip" "FAIL" "pip is unavailable and automatic installation failed"
   return 1
 }
 
@@ -109,6 +149,136 @@ try_pip_install() {
   return 1
 }
 
+check_cupy_cuda_runtime() {
+  if ! cmd python3; then
+    return 1
+  fi
+
+  python3 - <<'PY' 2>/dev/null
+import ctypes
+import sys
+
+missing = []
+for lib in ("libcudart.so.12", "libcublas.so.12", "libnvrtc.so.12"):
+    try:
+        ctypes.CDLL(lib)
+    except OSError as exc:
+        missing.append(f"{lib}: {exc}")
+
+if missing:
+    print("; ".join(missing))
+    sys.exit(1)
+
+print("CUDA runtime libraries for CuPy are available")
+PY
+}
+
+append_python_cuda_lib_paths() {
+  if ! cmd python3; then
+    return 1
+  fi
+
+  local discovered
+  discovered="$(python3 - <<'PY' 2>/dev/null
+import importlib.util
+from pathlib import Path
+
+targets = [
+    ("nvidia.cublas", "lib"),
+    ("nvidia.cuda_runtime", "lib"),
+    ("nvidia.cuda_nvrtc", "lib"),
+]
+
+for module_name, subdir in targets:
+    spec = importlib.util.find_spec(module_name)
+    if not spec or not spec.submodule_search_locations:
+        continue
+    base = Path(next(iter(spec.submodule_search_locations)))
+    lib_dir = base / subdir
+    if lib_dir.is_dir():
+        print(str(lib_dir))
+PY
+)"
+
+  if [[ -z "$discovered" ]]; then
+    return 1
+  fi
+
+  local changed=0
+  local dir
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    if [[ ":${LD_LIBRARY_PATH:-}:" != *":$dir:"* ]]; then
+      if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$dir"
+      else
+        LD_LIBRARY_PATH="$dir"
+      fi
+      changed=1
+    fi
+  done <<< "$discovered"
+
+  export LD_LIBRARY_PATH
+
+  if [[ $changed -eq 1 ]]; then
+    record_result "backend:ldpath" "PASS" "Added Python CUDA library paths to LD_LIBRARY_PATH"
+  else
+    record_result "backend:ldpath" "SKIP" "Python CUDA library paths were already present in LD_LIBRARY_PATH"
+  fi
+  return 0
+}
+
+ensure_cupy_cuda_runtime() {
+  if [[ "$backend_cupy" -ne 1 ]]; then
+    return 0
+  fi
+  if [[ "$nvidia_gpu_count" -le 0 && "$nvidia_pci_count" -le 0 ]]; then
+    return 0
+  fi
+
+  append_python_cuda_lib_paths || true
+
+  local runtime_check
+  runtime_check="$(check_cupy_cuda_runtime)"
+  local runtime_rc=$?
+
+  if [[ $runtime_rc -eq 0 ]]; then
+    record_result "backend:cupy-runtime" "PASS" "$runtime_check"
+    return 0
+  fi
+
+  record_result "backend:cupy-runtime" "SKIP" "Missing CUDA runtime libraries (${runtime_check}). Auto-install will be attempted."
+
+  if ! ensure_pip_available; then
+    return 1
+  fi
+
+  local install_ok=1
+  if try_pip_install "cuda-cu12-libs" nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12; then
+    install_ok=0
+  fi
+  if try_pip_install "cupy-cuda12x-refresh" cupy-cuda12x; then
+    install_ok=0
+  fi
+
+  append_python_cuda_lib_paths || true
+
+  runtime_check="$(check_cupy_cuda_runtime)"
+  runtime_rc=$?
+
+  if [[ $runtime_rc -eq 0 ]]; then
+    record_result "backend:cupy-runtime" "PASS" "CUDA runtime is healthy after install"
+    return 0
+  fi
+
+  if [[ $install_ok -eq 0 ]]; then
+    record_result "backend:cupy-runtime" "FAIL" "Runtime libs were installed but CuPy runtime is still unhealthy: ${runtime_check}"
+  else
+    record_result "backend:cupy-runtime" "FAIL" "Unable to install CUDA runtime libraries for CuPy"
+  fi
+  return 1
+}
+
 ensure_gpu_backend() {
   if ! cmd python3; then
     record_result "backend:check" "SKIP" "python3 not found"
@@ -126,13 +296,14 @@ ensure_gpu_backend() {
     [[ "$backend_cupy" -eq 1 ]] && present+=("cupy")
     [[ "$backend_opencl" -eq 1 ]] && present+=("pyopencl")
     record_result "backend:check" "PASS" "Detected Python GPU backend(s): ${present[*]}"
+    ensure_cupy_cuda_runtime || true
     return 0
   fi
 
   record_result "backend:check" "SKIP" "No Python GPU backend detected. Auto-install will be attempted."
 
-  if ! pip_ready; then
-    record_result "backend:install" "FAIL" "pip is not available and could not be bootstrapped with ensurepip"
+  if ! ensure_pip_available; then
+    record_result "backend:install" "FAIL" "pip is not available and could not be installed automatically"
     return 1
   fi
 
@@ -161,6 +332,7 @@ ensure_gpu_backend() {
     [[ "$backend_cupy" -eq 1 ]] && present_after+=("cupy")
     [[ "$backend_opencl" -eq 1 ]] && present_after+=("pyopencl")
     record_result "backend:ready" "PASS" "Available backend(s) after install attempt: ${present_after[*]}"
+    ensure_cupy_cuda_runtime || true
     return 0
   fi
 
@@ -326,6 +498,7 @@ def test_torch():
     if count <= 0:
         return False
 
+    passed = 0
     for i in range(count):
         name = "unknown"
         try:
@@ -339,10 +512,13 @@ def test_torch():
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             checksum = float(c.item())
             emit("PASS", f"compute:torch:gpu{i}", f"{name}; matmul ok; checksum={checksum:.4f}; elapsed_ms={elapsed_ms:.2f}")
+            passed += 1
         except Exception as exc:
             emit("FAIL", f"compute:torch:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
-    emit("INFO", "compute:backend", "Using PyTorch CUDA/ROCm backend")
-    return True
+    if passed > 0:
+        emit("INFO", "compute:backend", "Using PyTorch CUDA/ROCm backend")
+        return True
+    return False
 
 def test_cupy():
     try:
@@ -356,6 +532,7 @@ def test_cupy():
     if count <= 0:
         return False
 
+    passed = 0
     for i in range(count):
         name = "unknown"
         try:
@@ -373,10 +550,13 @@ def test_cupy():
                 checksum = float(c.sum().get())
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 emit("PASS", f"compute:cupy:gpu{i}", f"{name}; matmul ok; checksum={checksum:.4f}; elapsed_ms={elapsed_ms:.2f}")
+                passed += 1
         except Exception as exc:
             emit("FAIL", f"compute:cupy:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
-    emit("INFO", "compute:backend", "Using CuPy CUDA backend")
-    return True
+    if passed > 0:
+        emit("INFO", "compute:backend", "Using CuPy CUDA backend")
+        return True
+    return False
 
 def test_opencl():
     try:
@@ -412,6 +592,7 @@ def test_opencl():
     }
     """
 
+    passed = 0
     for i, (platform, device) in enumerate(gpu_devices):
         name = f"{platform.name.strip()} / {device.name.strip()}"
         try:
@@ -432,12 +613,15 @@ def test_opencl():
             checksum = float(out.sum())
             if abs(checksum - expected) <= max(1e-3, expected * 1e-5):
                 emit("PASS", f"compute:opencl:gpu{i}", f"{name}; kernel ok; checksum={checksum:.2f}; elapsed_ms={elapsed_ms:.2f}")
+                passed += 1
             else:
                 emit("FAIL", f"compute:opencl:gpu{i}", f"{name}; checksum mismatch: got={checksum:.2f}, expected={expected:.2f}")
         except Exception as exc:
             emit("FAIL", f"compute:opencl:gpu{i}", f"{name}; {type(exc).__name__}: {exc}")
-    emit("INFO", "compute:backend", "Using OpenCL backend")
-    return True
+    if passed > 0:
+        emit("INFO", "compute:backend", "Using OpenCL backend")
+        return True
+    return False
 
 backend_used = test_torch() or test_cupy() or test_opencl()
 if not backend_used:
