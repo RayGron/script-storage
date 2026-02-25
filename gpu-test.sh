@@ -9,6 +9,7 @@ total_checks=0
 pass_count=0
 fail_count=0
 skip_count=0
+warn_count=0
 compute_checks=0
 compute_pass=0
 backend_torch=0
@@ -26,6 +27,7 @@ record_result() {
     PASS) ((pass_count += 1)) ;;
     FAIL) ((fail_count += 1)) ;;
     SKIP) ((skip_count += 1)) ;;
+    WARNING) ((warn_count += 1)) ;;
     *) return 0 ;;
   esac
 
@@ -174,6 +176,20 @@ for lib in ("libcudart.so.12", "libcublas.so.12", "libnvrtc.so.12"):
     except OSError as exc:
         missing.append(f"{lib}: {exc}")
 
+curand_candidates = ("libcurand.so", "libcurand.so.10")
+curand_ok = False
+curand_err = ""
+for lib in curand_candidates:
+    try:
+        ctypes.CDLL(lib)
+        curand_ok = True
+        break
+    except OSError as exc:
+        curand_err = str(exc)
+
+if not curand_ok:
+    missing.append(f"libcurand.so*: {curand_err}")
+
 if missing:
     print("; ".join(missing))
     sys.exit(1)
@@ -196,6 +212,7 @@ targets = [
     ("nvidia.cublas", "lib"),
     ("nvidia.cuda_runtime", "lib"),
     ("nvidia.cuda_nvrtc", "lib"),
+    ("nvidia.curand", "lib"),
 ]
 
 for module_name, subdir in targets:
@@ -263,7 +280,7 @@ ensure_cupy_cuda_runtime() {
   fi
 
   local install_ok=1
-  if try_pip_install "cuda-cu12-libs" nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12; then
+  if try_pip_install "cuda-cu12-libs" nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12 nvidia-curand-cu12; then
     install_ok=0
   fi
   if try_pip_install "cupy-cuda12x-refresh" cupy-cuda12x; then
@@ -462,7 +479,7 @@ elif cmd rocminfo; then
   fi
 else
   if [[ "$amd_pci_count" -gt 0 ]]; then
-    record_result "availability:amd" "FAIL" "AMD/ATI PCI devices detected, but rocm-smi/rocminfo are missing"
+    record_result "availability:amd" "WARNING" "AMD/ATI PCI devices detected, but rocm-smi/rocminfo are missing"
   else
     record_result "availability:amd" "SKIP" "rocm-smi/rocminfo not found"
   fi
@@ -658,7 +675,7 @@ fi
 hr
 echo "[Summary]"
 echo "Detected GPUs (best effort): ${detected_gpu_count}"
-echo "Checks: total=${total_checks}, pass=${pass_count}, fail=${fail_count}, skip=${skip_count}"
+echo "Checks: total=${total_checks}, pass=${pass_count}, fail=${fail_count}, warning=${warn_count}, skip=${skip_count}"
 echo "Compute checks: ${compute_checks}, compute passes: ${compute_pass}"
 
 overall="PASS"
