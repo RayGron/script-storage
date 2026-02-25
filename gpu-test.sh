@@ -142,8 +142,17 @@ try_pip_install() {
     return 0
   fi
 
+  # Debian/Ubuntu PEP 668 guard: retry with explicit override flag.
+  if grep -Eiq 'externally-managed-environment|PEP 668|externally managed' "$log_file"; then
+    if python3 -m pip install --user --upgrade --break-system-packages "$@" >"$log_file" 2>&1; then
+      record_result "backend:install:${label}" "PASS" "Installed package(s) with --break-system-packages: $*"
+      rm -f "$log_file" >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
   local tail_line
-  tail_line="$(tail -n 1 "$log_file" 2>/dev/null || echo "pip install failed")"
+  tail_line="$(grep -Eim1 'ERROR:|error:|PEP 668|externally-managed-environment' "$log_file" || tail -n 1 "$log_file" || echo "pip install failed")"
   record_result "backend:install:${label}" "SKIP" "Install attempt failed: ${tail_line}"
   rm -f "$log_file" >/dev/null 2>&1 || true
   return 1
