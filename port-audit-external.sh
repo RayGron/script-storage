@@ -2,15 +2,15 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <host> \"22,80,443\" | \"1-1024\""
+  echo "Usage: $0 <host> [\"22,80,443\" | \"1-1024\"]"
   exit 1
 }
 
 cmd() { command -v "$1" >/dev/null 2>&1; }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -ge 1 && $# -le 2 ]] || usage
 HOST="$1"
-SPEC="$2"
+SPEC="${2:-1-65535}"
 
 timeout_cmd="timeout"
 if ! cmd timeout; then
