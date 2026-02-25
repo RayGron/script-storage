@@ -12,9 +12,13 @@ skip_count=0
 warn_count=0
 compute_checks=0
 compute_pass=0
+compute_gpu_total=0
+compute_gpu_pass=0
 backend_torch=0
 backend_cupy=0
 backend_opencl=0
+declare -a system_gpu_list=()
+declare -a available_gpu_list=()
 
 record_result() {
   local check="$1"
@@ -36,6 +40,13 @@ record_result() {
     ((compute_checks += 1))
     if [[ "$status" == "PASS" ]]; then
       ((compute_pass += 1))
+    fi
+  fi
+
+  if [[ "$check" == compute:*:gpu* ]]; then
+    ((compute_gpu_total += 1))
+    if [[ "$status" == "PASS" ]]; then
+      ((compute_gpu_pass += 1))
     fi
   fi
 }
@@ -371,11 +382,13 @@ ensure_gpu_backend() {
 }
 
 pci_gpu_count=0
+system_gpu_count=0
 nvidia_pci_count=0
 amd_pci_count=0
 intel_pci_count=0
 nvidia_gpu_count=0
 amd_gpu_count=0
+available_gpu_count=0
 detected_gpu_count=0
 
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
@@ -389,16 +402,40 @@ if cmd lspci; then
   pci_lines="$(lspci -nn | grep -Ei 'vga|3d|display' || true)"
   if [[ -n "$pci_lines" ]]; then
     pci_gpu_count="$(printf '%s\n' "$pci_lines" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-    nvidia_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'nvidia' || true)"
-    amd_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'amd|ati' || true)"
-    intel_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic 'intel' || true)"
+    nvidia_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic '\[10de:' || true)"
+    amd_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic '\[1002:' || true)"
+    intel_pci_count="$(printf '%s\n' "$pci_lines" | grep -Eic '\[8086:' || true)"
     record_result "inventory:pci" "PASS" "${pci_gpu_count} GPU-class PCI device(s) detected"
     printf '%s\n' "$pci_lines"
+
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      # Exclude common virtual display adapter and keep physical GPU vendors.
+      if [[ "$line" =~ \[1234:1111\] ]]; then
+        continue
+      fi
+      if [[ "$line" =~ \[10de: || "$line" =~ \[1002: || "$line" =~ \[8086: ]]; then
+        system_gpu_list+=("$line")
+      fi
+    done <<< "$pci_lines"
+    system_gpu_count="${#system_gpu_list[@]}"
   else
     record_result "inventory:pci" "FAIL" "No GPU-class PCI devices detected"
   fi
 else
   record_result "inventory:pci" "SKIP" "lspci not found (install pciutils)"
+fi
+
+echo
+echo "System GPUs (physical PCI): ${system_gpu_count}"
+if [[ "$system_gpu_count" -gt 0 ]]; then
+  i=0
+  for line in "${system_gpu_list[@]}"; do
+    printf "  [%d] %s\n" "$i" "$line"
+    ((i += 1))
+  done
+else
+  echo "  none"
 fi
 
 hr
@@ -412,6 +449,10 @@ if cmd nvidia-smi; then
     if [[ "$nvidia_gpu_count" -gt 0 ]]; then
       record_result "availability:nvidia" "PASS" "nvidia-smi reports ${nvidia_gpu_count} GPU(s)"
       printf '%s\n' "$nvidia_list"
+      while IFS= read -r line; do
+        [[ "$line" =~ ^GPU[[:space:]][0-9]+: ]] || continue
+        available_gpu_list+=("NVIDIA | $line")
+      done <<< "$nvidia_list"
     else
       if [[ "$nvidia_pci_count" -gt 0 ]]; then
         record_result "availability:nvidia" "FAIL" "NVIDIA PCI devices present, but nvidia-smi lists no GPUs"
@@ -442,6 +483,11 @@ if cmd rocm-smi; then
     if [[ "$amd_gpu_count" -gt 0 ]]; then
       record_result "availability:amd" "PASS" "rocm-smi reports ${amd_gpu_count} GPU(s)"
       printf '%s\n' "$rocm_smi_out"
+      i=0
+      while [[ "$i" -lt "$amd_gpu_count" ]]; do
+        available_gpu_list+=("AMD | rocm-smi GPU[$i]")
+        ((i += 1))
+      done
     else
       if [[ "$amd_pci_count" -gt 0 ]]; then
         record_result "availability:amd" "FAIL" "AMD/ATI PCI devices present, but rocm-smi lists no GPUs"
@@ -463,6 +509,11 @@ elif cmd rocminfo; then
     amd_gpu_count="$(printf '%s\n' "$rocminfo_out" | grep -Eic 'Name:[[:space:]]+gfx' || true)"
     if [[ "$amd_gpu_count" -gt 0 ]]; then
       record_result "availability:amd" "PASS" "rocminfo reports ${amd_gpu_count} GPU agent(s)"
+      while IFS= read -r line; do
+        [[ "$line" =~ Name:[[:space:]]+gfx ]] || continue
+        gpu_name="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*Name:[[:space:]]*//')"
+        available_gpu_list+=("AMD | ${gpu_name}")
+      done <<< "$rocminfo_out"
     else
       if [[ "$amd_pci_count" -gt 0 ]]; then
         record_result "availability:amd" "FAIL" "AMD/ATI PCI devices present, but rocminfo lists no GPU agents"
@@ -488,6 +539,9 @@ fi
 if [[ "$intel_pci_count" -gt 0 ]]; then
   if compgen -G "/dev/dri/renderD*" >/dev/null; then
     record_result "availability:intel" "PASS" "Intel GPU PCI devices present and /dev/dri/renderD* exists"
+    for render_node in /dev/dri/renderD*; do
+      available_gpu_list+=("Intel | ${render_node}")
+    done
   else
     record_result "availability:intel" "FAIL" "Intel GPU PCI devices present, but /dev/dri/renderD* is missing"
   fi
@@ -495,8 +549,30 @@ else
   record_result "availability:intel" "SKIP" "No Intel GPU-class PCI devices detected"
 fi
 
-if [[ "$pci_gpu_count" -gt 0 ]]; then
-  detected_gpu_count="$pci_gpu_count"
+available_gpu_count="${#available_gpu_list[@]}"
+
+echo
+echo "Workload-available GPUs: ${available_gpu_count}"
+if [[ "$available_gpu_count" -gt 0 ]]; then
+  i=0
+  for line in "${available_gpu_list[@]}"; do
+    printf "  [%d] %s\n" "$i" "$line"
+    ((i += 1))
+  done
+else
+  echo "  none"
+fi
+
+if [[ "$system_gpu_count" -gt 0 ]]; then
+  if [[ "$available_gpu_count" -ne "$system_gpu_count" ]]; then
+    record_result "availability:count-match" "WARNING" "System GPUs (${system_gpu_count}) != workload-available GPUs (${available_gpu_count})"
+  else
+    record_result "availability:count-match" "PASS" "System GPUs match workload-available GPUs (${available_gpu_count})"
+  fi
+fi
+
+if [[ "$system_gpu_count" -gt 0 ]]; then
+  detected_gpu_count="$system_gpu_count"
 else
   detected_gpu_count=$((nvidia_gpu_count + amd_gpu_count + intel_pci_count))
 fi
@@ -675,8 +751,10 @@ fi
 hr
 echo "[Summary]"
 echo "Detected GPUs (best effort): ${detected_gpu_count}"
+echo "System GPUs (physical): ${system_gpu_count}, workload-available GPUs: ${available_gpu_count}"
 echo "Checks: total=${total_checks}, pass=${pass_count}, fail=${fail_count}, warning=${warn_count}, skip=${skip_count}"
 echo "Compute checks: ${compute_checks}, compute passes: ${compute_pass}"
+echo "Compute GPU tests passed: ${compute_gpu_pass}/${compute_gpu_total}"
 
 overall="PASS"
 reason="GPU availability and compute smoke test look healthy"
