@@ -105,7 +105,7 @@ Optional (platform-dependent): `nvidia-smi`, `rocm-smi`/`rocminfo`, `pip`, `sudo
 
 ### `proxmox/` automation
 
-Implements Plan v6 policy:
+Implements 4GPU-2VM-ITex policy:
 - VM names: `vm-gpu-1`, `vm-gpu-2`, `vm-train`, `vm-infer`
 - mutual exclusion for `vm-train` / `vm-infer` via hookscript + watchdog
 - `idle` when both modes are stopped
