@@ -1,0 +1,11 @@
+[Unit]
+Description=ML mode policy watchdog for Proxmox VM mutual exclusion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ml-mode-watchdog.sh
+User=root
+Group=root
+

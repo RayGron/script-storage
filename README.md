@@ -2,6 +2,9 @@
 
 A set of small Bash scripts for quick server, port, and GPU diagnostics.
 
+It also includes Proxmox automation helpers for mutually exclusive
+training/inference VM modes with RAM guard checks in MiB (see `proxmox/`).
+
 ## Requirements
 
 - Linux
@@ -99,6 +102,22 @@ Exit codes:
 
 Main dependencies: `python3`, `lspci`.  
 Optional (platform-dependent): `nvidia-smi`, `rocm-smi`/`rocminfo`, `pip`, `sudo`, Python packages (`torch`, `cupy`, `pyopencl`, `numpy`).
+
+### `proxmox/` automation
+
+Implements Plan v6 policy:
+- VM names: `vm-gpu-1`, `vm-gpu-2`, `vm-train`, `vm-infer`
+- mutual exclusion for `vm-train` / `vm-infer` via hookscript + watchdog
+- `idle` when both modes are stopped
+- RAM plan in MiB:
+  - `vm-gpu-1=90112`
+  - `vm-gpu-2=90112`
+  - `vm-train=34816`
+  - `vm-infer=16384`
+- RAM guard: running sum must stay `<= 231424` MiB
+
+Details and setup steps: `proxmox/README.md`.
+Command examples after install: `mlmode train|infer|stop|status|check`.
 
 ## Quick Start
 

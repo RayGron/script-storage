@@ -1,0 +1,12 @@
+[Unit]
+Description=Run ML mode watchdog every 10 seconds
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=ml-mode-watchdog.service
+
+[Install]
+WantedBy=timers.target
+
