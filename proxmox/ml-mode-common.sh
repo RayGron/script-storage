@@ -21,6 +21,15 @@ VM_GPU_2_MEMORY_MIB="${VM_GPU_2_MEMORY_MIB:-90112}"
 VM_TRAIN_MEMORY_MIB="${VM_TRAIN_MEMORY_MIB:-34816}"
 VM_INFER_MEMORY_MIB="${VM_INFER_MEMORY_MIB:-16384}"
 
+VM_GPU_1_CORES="${VM_GPU_1_CORES:-96}"
+VM_GPU_2_CORES="${VM_GPU_2_CORES:-96}"
+VM_TRAIN_CORES="${VM_TRAIN_CORES:-24}"
+VM_INFER_CORES="${VM_INFER_CORES:-16}"
+
+VM_DEFAULT_SOCKETS="${VM_DEFAULT_SOCKETS:-1}"
+VM_DEFAULT_NUMA="${VM_DEFAULT_NUMA:-1}"
+VM_DEFAULT_CPU_TYPE="${VM_DEFAULT_CPU_TYPE:-host}"
+
 ensure_runtime_dirs() {
   mkdir -p "${ML_MODE_STATE_DIR}" "${ML_MODE_LOG_DIR}"
   if [[ ! -f "${ML_MODE_STATE_FILE}" ]]; then
@@ -138,6 +147,12 @@ get_vm_memory_mib() {
   qm config "${vmid}" | awk -F ': *' '$1=="memory" {print $2; exit}'
 }
 
+get_vm_config_value() {
+  local vmid="$1"
+  local key="$2"
+  qm config "${vmid}" | awk -F ': *' -v cfg_key="${key}" '$1==cfg_key {print $2; exit}'
+}
+
 running_memory_sum_mib() {
   local total=0
   local vmid mem
@@ -183,4 +198,57 @@ memory_plan_check() {
 
   sum=$((gpu1_mem + gpu2_mem + train_mem + infer_mem))
   ((sum == VM_MEMORY_LIMIT_MIB))
+}
+
+cpu_plan_check() {
+  local gpu1 gpu2 train infer
+  gpu1="$(require_vmid "${VM_GPU_1_NAME}")"
+  gpu2="$(require_vmid "${VM_GPU_2_NAME}")"
+  train="$(require_vmid "${VM_TRAIN_NAME}")"
+  infer="$(require_vmid "${VM_INFER_NAME}")"
+
+  local gpu1_cpu gpu2_cpu train_cpu infer_cpu
+  local gpu1_sockets gpu2_sockets train_sockets infer_sockets
+  local gpu1_cores gpu2_cores train_cores infer_cores
+  local gpu1_numa gpu2_numa train_numa infer_numa
+
+  gpu1_cpu="$(get_vm_config_value "${gpu1}" "cpu")"
+  gpu2_cpu="$(get_vm_config_value "${gpu2}" "cpu")"
+  train_cpu="$(get_vm_config_value "${train}" "cpu")"
+  infer_cpu="$(get_vm_config_value "${infer}" "cpu")"
+
+  gpu1_sockets="$(get_vm_config_value "${gpu1}" "sockets")"
+  gpu2_sockets="$(get_vm_config_value "${gpu2}" "sockets")"
+  train_sockets="$(get_vm_config_value "${train}" "sockets")"
+  infer_sockets="$(get_vm_config_value "${infer}" "sockets")"
+
+  gpu1_cores="$(get_vm_config_value "${gpu1}" "cores")"
+  gpu2_cores="$(get_vm_config_value "${gpu2}" "cores")"
+  train_cores="$(get_vm_config_value "${train}" "cores")"
+  infer_cores="$(get_vm_config_value "${infer}" "cores")"
+
+  gpu1_numa="$(get_vm_config_value "${gpu1}" "numa")"
+  gpu2_numa="$(get_vm_config_value "${gpu2}" "numa")"
+  train_numa="$(get_vm_config_value "${train}" "numa")"
+  infer_numa="$(get_vm_config_value "${infer}" "numa")"
+
+  [[ "${gpu1_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+  [[ "${gpu2_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+  [[ "${train_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+  [[ "${infer_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+
+  [[ "${gpu1_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+  [[ "${gpu2_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+  [[ "${train_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+  [[ "${infer_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+
+  [[ "${gpu1_cores}" == "${VM_GPU_1_CORES}" ]] || return 1
+  [[ "${gpu2_cores}" == "${VM_GPU_2_CORES}" ]] || return 1
+  [[ "${train_cores}" == "${VM_TRAIN_CORES}" ]] || return 1
+  [[ "${infer_cores}" == "${VM_INFER_CORES}" ]] || return 1
+
+  [[ "${gpu1_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
+  [[ "${gpu2_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
+  [[ "${train_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
+  [[ "${infer_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
 }

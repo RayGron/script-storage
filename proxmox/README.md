@@ -20,8 +20,8 @@ Total host memory: `262144` MiB
 ## Files
 
 - `ml-mode-common.sh`: shared logic
-- `ml-mode.sh`: CLI helper (`train|infer|stop|status|check`)
-- `mlmode`: command wrapper for `mlmode train|infer|stop|status|check`
+- `ml-mode.sh`: CLI helper (`train|infer|stop|status|check|apply-profile`)
+- `mlmode`: command wrapper for `mlmode train|infer|stop|status|check|apply-profile`
 - `ml-mode-hook.sh`: hookscript (`pre-start` enforcement)
 - `ml-mode-watchdog.sh`: anti-race watchdog
 - `ml-mode-watchdog.service`: systemd service
@@ -33,21 +33,21 @@ Total host memory: `262144` MiB
 Copy scripts:
 
 ```bash
-install -m 0755 proxmox/ml-mode.sh /usr/local/sbin/ml-mode.sh
-install -m 0755 proxmox/mlmode /usr/local/bin/mlmode
-install -m 0755 proxmox/ml-mode-hook.sh /usr/local/sbin/ml-mode-hook.sh
-install -m 0755 proxmox/ml-mode-watchdog.sh /usr/local/sbin/ml-mode-watchdog.sh
-install -m 0755 proxmox/ml-mode-acceptance.sh /usr/local/sbin/ml-mode-acceptance.sh
-install -m 0644 proxmox/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
+sudo install -m 0755 proxmox/ml-mode.sh /usr/local/sbin/ml-mode.sh
+sudo install -m 0755 proxmox/mlmode /usr/local/bin/mlmode
+sudo install -m 0755 proxmox/ml-mode-hook.sh /usr/local/sbin/ml-mode-hook.sh
+sudo install -m 0755 proxmox/ml-mode-watchdog.sh /usr/local/sbin/ml-mode-watchdog.sh
+sudo install -m 0755 proxmox/ml-mode-acceptance.sh /usr/local/sbin/ml-mode-acceptance.sh
+sudo install -m 0644 proxmox/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
 ```
 
 Install systemd units:
 
 ```bash
-install -m 0644 proxmox/ml-mode-watchdog.service /etc/systemd/system/ml-mode-watchdog.service
-install -m 0644 proxmox/ml-mode-watchdog.timer /etc/systemd/system/ml-mode-watchdog.timer
-systemctl daemon-reload
-systemctl enable --now ml-mode-watchdog.timer
+sudo install -m 0644 proxmox/ml-mode-watchdog.service /etc/systemd/system/ml-mode-watchdog.service
+sudo install -m 0644 proxmox/ml-mode-watchdog.timer /etc/systemd/system/ml-mode-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now ml-mode-watchdog.timer
 ```
 
 ## Configure VM memory (MiB)
@@ -55,23 +55,28 @@ systemctl enable --now ml-mode-watchdog.timer
 Resolve VMIDs:
 
 ```bash
-qm list
+sudo qm list
 ```
 
-Set memory values:
+Set CPU + memory values in one command:
 
 ```bash
-qm set <vmid-vm-gpu-1> --memory 90112 --balloon 90112
-qm set <vmid-vm-gpu-2> --memory 90112 --balloon 90112
-qm set <vmid-vm-train> --memory 34816 --balloon 34816
-qm set <vmid-vm-infer> --memory 16384 --balloon 16384
+sudo mlmode apply-profile
 ```
+
+This applies:
+- `cpu=host`
+- `sockets=1`
+- `numa=1`
+- `cores`: `vm-gpu-1=96`, `vm-gpu-2=96`, `vm-train=24`, `vm-infer=16`
+- `memory/balloon`: `90112/90112/34816/16384` MiB
+- `agent=1`
 
 ## Attach hookscript to control-plane VMs
 
 ```bash
-qm set <vmid-vm-train> --hookscript local:snippets/ml-mode-hook.sh
-qm set <vmid-vm-infer> --hookscript local:snippets/ml-mode-hook.sh
+sudo qm set <vmid-vm-train> --hookscript local:snippets/ml-mode-hook.sh
+sudo qm set <vmid-vm-infer> --hookscript local:snippets/ml-mode-hook.sh
 ```
 
 Notes:
@@ -92,14 +97,16 @@ mlmode infer
 mlmode stop
 mlmode status
 mlmode check
+mlmode apply-profile
 ```
 
 ## Acceptance checks
 
 ```bash
-/usr/local/sbin/ml-mode-acceptance.sh
+sudo /usr/local/sbin/ml-mode-acceptance.sh
 ```
 
 Expected:
 - memory values match `90112/90112/34816/16384`
 - running memory sum is `<= 231424` MiB
+- CPU profile matches `cpu=host`, `sockets=1`, `numa=1`, cores `96/96/24/16`

@@ -118,6 +118,7 @@ Implements 4GPU-2VM-ITex policy:
 
 Details and setup steps: `proxmox/README.md`.
 Command examples after install: `mlmode train|infer|stop|status|check`.
+Resource profile apply command: `sudo mlmode apply-profile`.
 
 ## Quick Start
 

@@ -13,13 +13,15 @@ Usage:
   ml-mode.sh stop
   ml-mode.sh status
   ml-mode.sh check
+  ml-mode.sh apply-profile
 
 Commands:
   train   Stop vm-infer (if running), start vm-train and GPU workers, enforce RAM guard.
   infer   Stop vm-train (if running), start vm-infer and GPU workers, enforce RAM guard.
   stop    Stop vm-train and vm-infer, keep system in idle mode.
   status  Show current vm status and policy state.
-  check   Verify memory plan in MiB and RAM guard threshold.
+  check   Verify memory+CPU plan and RAM guard threshold.
+  apply-profile  Apply recommended CPU/memory/NUMA settings to all 4 VMs.
 EOF
 }
 
@@ -120,6 +122,27 @@ run_check() {
     echo "ram guard check: FAIL (running > ${VM_MEMORY_LIMIT_MIB} MiB)" >&2
     exit 1
   fi
+
+  if cpu_plan_check; then
+    echo "cpu plan check: PASS (cpu=${VM_DEFAULT_CPU_TYPE}, sockets=${VM_DEFAULT_SOCKETS}, cores=${VM_GPU_1_CORES}/${VM_GPU_2_CORES}/${VM_TRAIN_CORES}/${VM_INFER_CORES}, numa=${VM_DEFAULT_NUMA})"
+  else
+    echo "cpu plan check: FAIL (expected cpu=${VM_DEFAULT_CPU_TYPE}, sockets=${VM_DEFAULT_SOCKETS}, cores=${VM_GPU_1_CORES}/${VM_GPU_2_CORES}/${VM_TRAIN_CORES}/${VM_INFER_CORES}, numa=${VM_DEFAULT_NUMA})" >&2
+    exit 1
+  fi
+}
+
+apply_profile() {
+  local gpu1_vmid gpu2_vmid train_vmid infer_vmid
+  gpu1_vmid="$(require_vmid "${VM_GPU_1_NAME}")"
+  gpu2_vmid="$(require_vmid "${VM_GPU_2_NAME}")"
+  train_vmid="$(require_vmid "${VM_TRAIN_NAME}")"
+  infer_vmid="$(require_vmid "${VM_INFER_NAME}")"
+
+  qm set "${gpu1_vmid}" --cpu "${VM_DEFAULT_CPU_TYPE}" --sockets "${VM_DEFAULT_SOCKETS}" --cores "${VM_GPU_1_CORES}" --numa "${VM_DEFAULT_NUMA}" --memory "${VM_GPU_1_MEMORY_MIB}" --balloon "${VM_GPU_1_MEMORY_MIB}" --agent 1
+  qm set "${gpu2_vmid}" --cpu "${VM_DEFAULT_CPU_TYPE}" --sockets "${VM_DEFAULT_SOCKETS}" --cores "${VM_GPU_2_CORES}" --numa "${VM_DEFAULT_NUMA}" --memory "${VM_GPU_2_MEMORY_MIB}" --balloon "${VM_GPU_2_MEMORY_MIB}" --agent 1
+  qm set "${train_vmid}" --cpu "${VM_DEFAULT_CPU_TYPE}" --sockets "${VM_DEFAULT_SOCKETS}" --cores "${VM_TRAIN_CORES}" --numa "${VM_DEFAULT_NUMA}" --memory "${VM_TRAIN_MEMORY_MIB}" --balloon "${VM_TRAIN_MEMORY_MIB}" --agent 1
+  qm set "${infer_vmid}" --cpu "${VM_DEFAULT_CPU_TYPE}" --sockets "${VM_DEFAULT_SOCKETS}" --cores "${VM_INFER_CORES}" --numa "${VM_DEFAULT_NUMA}" --memory "${VM_INFER_MEMORY_MIB}" --balloon "${VM_INFER_MEMORY_MIB}" --agent 1
+  echo "profile applied: CPU and memory settings updated for ${VM_GPU_1_NAME}, ${VM_GPU_2_NAME}, ${VM_TRAIN_NAME}, ${VM_INFER_NAME}"
 }
 
 main() {
@@ -133,6 +156,7 @@ main() {
     stop) stop_both "cli" ;;
     status) show_status ;;
     check) run_check ;;
+    apply-profile) apply_profile ;;
     -h|--help) usage ;;
     *) usage; exit 2 ;;
   esac
