@@ -3,6 +3,24 @@ set -euo pipefail
 
 hr() { printf "\n%s\n" "============================================================"; }
 cmd() { command -v "$1" >/dev/null 2>&1; }
+usage() {
+  cat <<'EOF'
+Usage: port-audit.sh [--help]
+
+Shows listening TCP/UDP sockets and local firewall state (ufw/firewalld/nftables/iptables when available).
+
+Exit codes:
+  0  success
+  2  invalid usage
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+fi
 
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
 echo "Date: $(date -Is)"
@@ -44,3 +62,4 @@ fi
 echo
 echo "Note: external reachability still depends on upstream NAT / security-groups."
 echo "Done."
+exit 0

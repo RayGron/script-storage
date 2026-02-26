@@ -4,6 +4,25 @@ set -o pipefail
 
 hr() { printf "\n%s\n" "============================================================"; }
 cmd() { command -v "$1" >/dev/null 2>&1; }
+usage() {
+  cat <<'EOF'
+Usage: gpu-test.sh [--help]
+
+Runs GPU availability checks and compute smoke tests (PyTorch/CuPy/OpenCL when available).
+
+Exit codes:
+  0  overall PASS
+  1  overall FAIL
+  2  invalid usage
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+fi
 
 total_checks=0
 pass_count=0

@@ -2,13 +2,29 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <host> [\"22,80,443\" | \"1-1024\"]"
-  exit 1
+  cat <<'EOF'
+Usage: port-audit-external.sh <host> ["22,80,443" | "1-1024"] [--help]
+
+Checks TCP port reachability on a target host via /dev/tcp probes.
+
+Exit codes:
+  0  script executed successfully
+  1  runtime dependency error
+  2  invalid usage
+EOF
 }
 
 cmd() { command -v "$1" >/dev/null 2>&1; }
 
-[[ $# -ge 1 && $# -le 2 ]] || usage
+if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "error: invalid arguments" >&2
+  usage >&2
+  exit 2
+fi
 HOST="$1"
 SPEC="${2:-1-65535}"
 
@@ -47,3 +63,4 @@ while read -r p; do
   [[ "$p" =~ ^[0-9]+$ ]] || continue
   probe_tcp "$HOST" "$p"
 done < <(expand_ports "$SPEC")
+exit 0

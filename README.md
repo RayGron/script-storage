@@ -109,3 +109,15 @@ chmod +x *.sh
 ./gpu-audit.sh
 ./gpu-test.sh
 ```
+
+## Help
+
+Each script supports `-h` / `--help`:
+
+```bash
+./server-audit.sh --help
+./port-audit.sh --help
+./port-audit-external.sh --help
+./gpu-audit.sh --help
+./gpu-test.sh --help
+```

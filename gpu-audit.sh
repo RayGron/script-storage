@@ -3,6 +3,24 @@ set -euo pipefail
 
 hr() { printf "\n%s\n" "============================================================"; }
 cmd() { command -v "$1" >/dev/null 2>&1; }
+usage() {
+  cat <<'EOF'
+Usage: gpu-audit.sh [--help]
+
+Collects GPU inventory and driver/tool visibility across NVIDIA, AMD, and Intel stacks.
+
+Exit codes:
+  0  success
+  2  invalid usage
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+fi
 
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
 echo "Date: $(date -Is)"
@@ -70,3 +88,4 @@ ls -l /dev/dri/* 2>/dev/null || true
 
 echo
 echo "Done."
+exit 0
