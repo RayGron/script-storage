@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SCRIPT="${SCRIPT_DIR}/../watchdog/ml-mode-common.sh"
+if [[ ! -f "${COMMON_SCRIPT}" ]]; then
+  COMMON_SCRIPT="/usr/local/sbin/ml-mode-common.sh"
+fi
+# shellcheck source=../watchdog/ml-mode-common.sh
+source "${COMMON_SCRIPT}"
+
 hr() { printf "\n%s\n" "============================================================"; }
 cmd() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
-  cat <<'EOU'
+  cat <<EOF
 Usage: gpu-audit.sh [--help]
 
-Proxmox-oriented GPU audit:
-- physical GPU inventory on host
-- IOMMU/VFIO visibility
-- passthrough mapping to vm-gpu-1 and vm-gpu-2
-EOU
+Proxmox-oriented GPU audit using node list from:
+  ${MLMAN_CONFIG_JSON}
+EOF
 }
 
 if [[ $# -gt 0 ]]; then
@@ -22,13 +28,14 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-resolve_vmid_by_name() {
-  local name="$1"
-  qm list | awk -v vmname="$name" 'NR>1 && $2 == vmname {print $1; exit}'
-}
-
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
 echo "Date: $(date -Is)"
+
+hr
+echo "[Configured GPU nodes]"
+for vm_name in "${MLMAN_GPU_NODE_NAMES[@]}"; do
+  echo "${vm_name}: ip=$(get_gpu_node_ip "${vm_name}") user=$(get_gpu_node_user "${vm_name}") enabled=$(gpu_node_is_enabled "${vm_name}" && echo true || echo false)"
+done
 
 hr
 echo "[PCI GPUs on host]"
@@ -65,8 +72,15 @@ if cmd lsmod; then
 fi
 
 hr
-echo "[Passthrough mapping to GPU VMs]"
-for vm_name in vm-gpu-1 vm-gpu-2; do
+echo "[Passthrough mapping to configured GPU VMs]"
+profile_gpu_nodes=()
+if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+  profile_gpu_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+else
+  profile_gpu_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+fi
+
+for vm_name in "${profile_gpu_nodes[@]}"; do
   vmid="$(resolve_vmid_by_name "$vm_name")"
   if [[ -z "$vmid" ]]; then
     echo "[MISSING] $vm_name"

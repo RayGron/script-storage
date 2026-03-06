@@ -1,47 +1,359 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Shared helpers for ml-mode, hookscript, and watchdog.
+# Shared helpers for mlman, hookscript, and watchdog.
 
-ML_MODE_STATE_DIR="${ML_MODE_STATE_DIR:-/var/lib/ml-mode}"
-ML_MODE_LOG_DIR="${ML_MODE_LOG_DIR:-/var/log/ml-mode}"
+MLMAN_CONFIG_JSON="${MLMAN_CONFIG_JSON:-/etc/mlman/mlman.conf}"
+
+# Legacy compatibility alias.
+MLMAN_CONF_FILE="${MLMAN_CONF_FILE:-${MLMAN_CONFIG_JSON}}"
+
+declare -a MLMAN_GPU_NODE_NAMES=()
+declare -a MLMAN_ENABLED_GPU_NODE_NAMES=()
+declare -A MLMAN_GPU_NODE_IP_BY_NAME=()
+declare -A MLMAN_GPU_NODE_SSH_USER_BY_NAME=()
+declare -A MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME=()
+declare -A MLMAN_GPU_NODE_CORES_BY_NAME=()
+declare -A MLMAN_GPU_NODE_GPU_COUNT_BY_NAME=()
+declare -A MLMAN_GPU_NODE_ENABLED_BY_NAME=()
+
+seed_default_gpu_nodes() {
+  local n1="vm-gpu-1"
+  local n2="vm-gpu-2"
+
+  MLMAN_GPU_NODE_NAMES=("${n1}" "${n2}")
+  MLMAN_ENABLED_GPU_NODE_NAMES=("${n1}" "${n2}")
+
+  MLMAN_GPU_NODE_IP_BY_NAME["${n1}"]="${MLMAN_DEFAULT_GPU1_IP:-}"
+  MLMAN_GPU_NODE_IP_BY_NAME["${n2}"]="${MLMAN_DEFAULT_GPU2_IP:-}"
+
+  MLMAN_GPU_NODE_SSH_USER_BY_NAME["${n1}"]="${MLMAN_DEFAULT_GPU1_USER:-${MLMAN_DEFAULT_GPU_USER:-}}"
+  MLMAN_GPU_NODE_SSH_USER_BY_NAME["${n2}"]="${MLMAN_DEFAULT_GPU2_USER:-${MLMAN_DEFAULT_GPU_USER:-}}"
+
+  MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME["${n1}"]="${VM_GPU_1_MEMORY_MIB:-90112}"
+  MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME["${n2}"]="${VM_GPU_2_MEMORY_MIB:-90112}"
+  MLMAN_GPU_NODE_CORES_BY_NAME["${n1}"]="${VM_GPU_1_CORES:-96}"
+  MLMAN_GPU_NODE_CORES_BY_NAME["${n2}"]="${VM_GPU_2_CORES:-96}"
+  MLMAN_GPU_NODE_GPU_COUNT_BY_NAME["${n1}"]="${MLMAN_DEFAULT_GPU1_COUNT:-2}"
+  MLMAN_GPU_NODE_GPU_COUNT_BY_NAME["${n2}"]="${MLMAN_DEFAULT_GPU2_COUNT:-2}"
+  MLMAN_GPU_NODE_ENABLED_BY_NAME["${n1}"]="true"
+  MLMAN_GPU_NODE_ENABLED_BY_NAME["${n2}"]="true"
+}
+
+resolve_gpu_defaults_from_common_user() {
+  local common_user="${MLMAN_DEFAULT_GPU_USER:-}"
+  if [[ -n "${common_user}" ]]; then
+    [[ -z "${MLMAN_DEFAULT_GPU1_USER:-}" ]] && MLMAN_DEFAULT_GPU1_USER="${common_user}"
+    [[ -z "${MLMAN_DEFAULT_GPU2_USER:-}" ]] && MLMAN_DEFAULT_GPU2_USER="${common_user}"
+  fi
+}
+
+load_mlman_json_config() {
+  # Baseline defaults.
+  ML_MODE_STATE_DIR="${ML_MODE_STATE_DIR:-/var/lib/mlman}"
+  ML_MODE_LOG_DIR="${ML_MODE_LOG_DIR:-/var/log/mlman}"
+  ML_CONTROL_ROOT="${ML_CONTROL_ROOT:-/mnt/shared-storage/mlshare/control}"
+  ML_CONTROL_LOCK_TIMEOUT_SEC="${ML_CONTROL_LOCK_TIMEOUT_SEC:-60}"
+  ML_INFER_SSH_USER="${ML_INFER_SSH_USER:-root}"
+  ML_INFER_SSH_HOST="${ML_INFER_SSH_HOST:-}"
+  ML_INFERCTL_PATH="${ML_INFERCTL_PATH:-/usr/local/sbin/inferctl.sh}"
+  ML_SSH_CONNECT_TIMEOUT_SEC="${ML_SSH_CONNECT_TIMEOUT_SEC:-10}"
+
+  VM_TRAIN_NAME="${VM_TRAIN_NAME:-vm-train}"
+  VM_INFER_NAME="${VM_INFER_NAME:-vm-infer}"
+  VM_TRAIN_MEMORY_MIB="${VM_TRAIN_MEMORY_MIB:-34816}"
+  VM_INFER_MEMORY_MIB="${VM_INFER_MEMORY_MIB:-16384}"
+  VM_TRAIN_CORES="${VM_TRAIN_CORES:-24}"
+  VM_INFER_CORES="${VM_INFER_CORES:-16}"
+  VM_DEFAULT_SOCKETS="${VM_DEFAULT_SOCKETS:-1}"
+  VM_DEFAULT_NUMA="${VM_DEFAULT_NUMA:-1}"
+  VM_DEFAULT_CPU_TYPE="${VM_DEFAULT_CPU_TYPE:-host}"
+  VENV_PATH="${VENV_PATH:-~/venv-vllm}"
+  HF_HOME="${HF_HOME:-/mnt/shared/models/.hf}"
+  HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-/mnt/shared/models/.hf/hub}"
+  TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/mnt/shared/models/.hf/transformers}"
+  VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-/mnt/shared/models/.vllm}"
+  INFER_LOG_DIR="${INFER_LOG_DIR:-/mnt/shared/logs/infer}"
+  RAY_PORT="${RAY_PORT:-6379}"
+  RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+  VLLM_PORT="${VLLM_PORT:-8000}"
+  VLLM_HEALTHCHECK_RETRIES="${VLLM_HEALTHCHECK_RETRIES:-30}"
+  VLLM_HEALTHCHECK_INTERVAL_SEC="${VLLM_HEALTHCHECK_INTERVAL_SEC:-2}"
+
+  HOST_RESERVED_MIB="${HOST_RESERVED_MIB:-30720}"
+  VM_MEMORY_LIMIT_MIB="${VM_MEMORY_LIMIT_MIB:-231424}"
+  MLMAN_RAY_HEAD_NODE="${MLMAN_RAY_HEAD_NODE:-}"
+
+  MLMAN_DEFAULT_GPU1_IP="${MLMAN_DEFAULT_GPU1_IP:-}"
+  MLMAN_DEFAULT_GPU2_IP="${MLMAN_DEFAULT_GPU2_IP:-}"
+  MLMAN_DEFAULT_GPU_USER="${MLMAN_DEFAULT_GPU_USER:-}"
+  MLMAN_DEFAULT_GPU1_USER="${MLMAN_DEFAULT_GPU1_USER:-}"
+  MLMAN_DEFAULT_GPU2_USER="${MLMAN_DEFAULT_GPU2_USER:-}"
+  MLMAN_DEFAULT_NET_IF="${MLMAN_DEFAULT_NET_IF:-eth0}"
+
+  if [[ ! -f "${MLMAN_CONFIG_JSON}" ]]; then
+    resolve_gpu_defaults_from_common_user
+    seed_default_gpu_nodes
+    return 0
+  fi
+
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to parse JSON config: ${MLMAN_CONFIG_JSON}" >&2
+    exit 1
+  }
+
+  jq -e . "${MLMAN_CONFIG_JSON}" >/dev/null 2>&1 || {
+    echo "error: invalid JSON config: ${MLMAN_CONFIG_JSON}" >&2
+    exit 1
+  }
+
+  ML_MODE_STATE_DIR="$(jq -r '.control.state_dir // "/var/lib/mlman"' "${MLMAN_CONFIG_JSON}")"
+  ML_MODE_LOG_DIR="$(jq -r '.control.log_dir // "/var/log/mlman"' "${MLMAN_CONFIG_JSON}")"
+  ML_CONTROL_ROOT="$(jq -r '.control.root // "/mnt/shared-storage/mlshare/control"' "${MLMAN_CONFIG_JSON}")"
+  ML_CONTROL_LOCK_TIMEOUT_SEC="$(jq -r '.control.lock_timeout_sec // 60' "${MLMAN_CONFIG_JSON}")"
+  ML_INFER_SSH_USER="$(jq -r '.control.infer_ssh_user // "root"' "${MLMAN_CONFIG_JSON}")"
+  ML_INFER_SSH_HOST="$(jq -r '.control.infer_ssh_host // empty' "${MLMAN_CONFIG_JSON}")"
+  ML_INFERCTL_PATH="$(jq -r '.control.inferctl_path // "/usr/local/sbin/inferctl.sh"' "${MLMAN_CONFIG_JSON}")"
+  ML_SSH_CONNECT_TIMEOUT_SEC="$(jq -r '.control.ssh_connect_timeout_sec // 10' "${MLMAN_CONFIG_JSON}")"
+
+  VM_TRAIN_NAME="$(jq -r '.vm_names.train // "vm-train"' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_NAME="$(jq -r '.vm_names.infer // "vm-infer"' "${MLMAN_CONFIG_JSON}")"
+  VM_TRAIN_MEMORY_MIB="$(jq -r '.profiles.train.memory_mib // 34816' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_MEMORY_MIB="$(jq -r '.profiles.infer.memory_mib // 16384' "${MLMAN_CONFIG_JSON}")"
+  VM_TRAIN_CORES="$(jq -r '.profiles.train.cores // 24' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_CORES="$(jq -r '.profiles.infer.cores // 16' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_CPU_TYPE="$(jq -r '.resource_defaults.cpu // "host"' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_SOCKETS="$(jq -r '.resource_defaults.sockets // 1' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_NUMA="$(jq -r '.resource_defaults.numa // 1' "${MLMAN_CONFIG_JSON}")"
+
+  HOST_RESERVED_MIB="$(jq -r '.limits.host_reserved_mib // 30720' "${MLMAN_CONFIG_JSON}")"
+  VM_MEMORY_LIMIT_MIB="$(jq -r '.limits.vm_memory_limit_mib // 0' "${MLMAN_CONFIG_JSON}")"
+
+  MLMAN_DEFAULT_NET_IF="$(jq -r '.inference.net_if // "eth0"' "${MLMAN_CONFIG_JSON}")"
+  MLMAN_RAY_HEAD_NODE="$(jq -r '.inference.ray_head_node // empty' "${MLMAN_CONFIG_JSON}")"
+  VENV_PATH="$(jq -r '.inference.venv_path // "~/venv-vllm"' "${MLMAN_CONFIG_JSON}")"
+  HF_HOME="$(jq -r '.inference.hf_home // "/mnt/shared/models/.hf"' "${MLMAN_CONFIG_JSON}")"
+  HUGGINGFACE_HUB_CACHE="$(jq -r '.inference.huggingface_hub_cache // "/mnt/shared/models/.hf/hub"' "${MLMAN_CONFIG_JSON}")"
+  TRANSFORMERS_CACHE="$(jq -r '.inference.transformers_cache // "/mnt/shared/models/.hf/transformers"' "${MLMAN_CONFIG_JSON}")"
+  VLLM_DOWNLOAD_DIR="$(jq -r '.inference.vllm_download_dir // "/mnt/shared/models/.vllm"' "${MLMAN_CONFIG_JSON}")"
+  INFER_LOG_DIR="$(jq -r '.inference.infer_log_dir // "/mnt/shared/logs/infer"' "${MLMAN_CONFIG_JSON}")"
+  RAY_PORT="$(jq -r '.inference.ray_port // 6379' "${MLMAN_CONFIG_JSON}")"
+  RAY_DASHBOARD_PORT="$(jq -r '.inference.ray_dashboard_port // 8265' "${MLMAN_CONFIG_JSON}")"
+  VLLM_PORT="$(jq -r '.inference.vllm_port // 8000' "${MLMAN_CONFIG_JSON}")"
+  VLLM_HEALTHCHECK_RETRIES="$(jq -r '.inference.vllm_healthcheck_retries // 30' "${MLMAN_CONFIG_JSON}")"
+  VLLM_HEALTHCHECK_INTERVAL_SEC="$(jq -r '.inference.vllm_healthcheck_interval_sec // 2' "${MLMAN_CONFIG_JSON}")"
+
+  MLMAN_DEFAULT_GPU1_IP=""
+  MLMAN_DEFAULT_GPU2_IP=""
+  MLMAN_DEFAULT_GPU_USER=""
+  MLMAN_DEFAULT_GPU1_USER=""
+  MLMAN_DEFAULT_GPU2_USER=""
+
+  MLMAN_GPU_NODE_NAMES=()
+  MLMAN_ENABLED_GPU_NODE_NAMES=()
+  MLMAN_GPU_NODE_IP_BY_NAME=()
+  MLMAN_GPU_NODE_SSH_USER_BY_NAME=()
+  MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME=()
+  MLMAN_GPU_NODE_CORES_BY_NAME=()
+  MLMAN_GPU_NODE_GPU_COUNT_BY_NAME=()
+  MLMAN_GPU_NODE_ENABLED_BY_NAME=()
+
+  while IFS=$'\t' read -r node_name node_ip node_user node_memory node_cores node_gpu_count node_enabled; do
+    [[ -z "${node_name}" ]] && continue
+    MLMAN_GPU_NODE_NAMES+=("${node_name}")
+    MLMAN_GPU_NODE_IP_BY_NAME["${node_name}"]="${node_ip}"
+    MLMAN_GPU_NODE_SSH_USER_BY_NAME["${node_name}"]="${node_user}"
+    MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME["${node_name}"]="${node_memory}"
+    MLMAN_GPU_NODE_CORES_BY_NAME["${node_name}"]="${node_cores}"
+    MLMAN_GPU_NODE_GPU_COUNT_BY_NAME["${node_name}"]="${node_gpu_count}"
+    MLMAN_GPU_NODE_ENABLED_BY_NAME["${node_name}"]="${node_enabled}"
+    if [[ "${node_enabled}" == "true" ]]; then
+      MLMAN_ENABLED_GPU_NODE_NAMES+=("${node_name}")
+    fi
+  done < <(
+    jq -r '
+      (.gpu_nodes // [])[] |
+      [
+        (.name // ""),
+        (.ip // ""),
+        (.ssh_user // ""),
+        (.memory_mib // 90112),
+        (.cores // 96),
+        (.gpu_count // 2),
+        (if (.enabled // true) then "true" else "false" end)
+      ] | @tsv
+    ' "${MLMAN_CONFIG_JSON}"
+  )
+
+  if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -eq 0 ]]; then
+    seed_default_gpu_nodes
+  fi
+
+  # Compatibility aliases for legacy code paths.
+  if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -ge 1 ]]; then
+    VM_GPU_1_NAME="${MLMAN_GPU_NODE_NAMES[0]}"
+    VM_GPU_1_MEMORY_MIB="${MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME[${VM_GPU_1_NAME}]}"
+    VM_GPU_1_CORES="${MLMAN_GPU_NODE_CORES_BY_NAME[${VM_GPU_1_NAME}]}"
+    MLMAN_DEFAULT_GPU1_IP="${MLMAN_GPU_NODE_IP_BY_NAME[${VM_GPU_1_NAME}]}"
+    MLMAN_DEFAULT_GPU1_USER="${MLMAN_GPU_NODE_SSH_USER_BY_NAME[${VM_GPU_1_NAME}]}"
+  else
+    VM_GPU_1_NAME="vm-gpu-1"
+    VM_GPU_1_MEMORY_MIB="90112"
+    VM_GPU_1_CORES="96"
+  fi
+  if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -ge 2 ]]; then
+    VM_GPU_2_NAME="${MLMAN_GPU_NODE_NAMES[1]}"
+    VM_GPU_2_MEMORY_MIB="${MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME[${VM_GPU_2_NAME}]}"
+    VM_GPU_2_CORES="${MLMAN_GPU_NODE_CORES_BY_NAME[${VM_GPU_2_NAME}]}"
+    MLMAN_DEFAULT_GPU2_IP="${MLMAN_GPU_NODE_IP_BY_NAME[${VM_GPU_2_NAME}]}"
+    MLMAN_DEFAULT_GPU2_USER="${MLMAN_GPU_NODE_SSH_USER_BY_NAME[${VM_GPU_2_NAME}]}"
+  else
+    VM_GPU_2_NAME="vm-gpu-2"
+    VM_GPU_2_MEMORY_MIB="90112"
+    VM_GPU_2_CORES="96"
+  fi
+
+  if [[ "${VM_MEMORY_LIMIT_MIB}" == "0" ]]; then
+    local mem_sum=0
+    local n
+    local -a profile_nodes=()
+    if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+      profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+    else
+      profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+    fi
+    for n in "${profile_nodes[@]}"; do
+      mem_sum=$((mem_sum + MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME["${n}"]))
+    done
+    mem_sum=$((mem_sum + VM_TRAIN_MEMORY_MIB + VM_INFER_MEMORY_MIB))
+    VM_MEMORY_LIMIT_MIB="${mem_sum}"
+  fi
+}
+
+get_gpu_node_ip() {
+  local node_name="$1"
+  printf "%s\n" "${MLMAN_GPU_NODE_IP_BY_NAME[${node_name}]:-}"
+}
+
+get_gpu_node_user() {
+  local node_name="$1"
+  printf "%s\n" "${MLMAN_GPU_NODE_SSH_USER_BY_NAME[${node_name}]:-}"
+}
+
+get_gpu_node_memory_mib() {
+  local node_name="$1"
+  printf "%s\n" "${MLMAN_GPU_NODE_MEMORY_MIB_BY_NAME[${node_name}]:-0}"
+}
+
+get_gpu_node_cores() {
+  local node_name="$1"
+  printf "%s\n" "${MLMAN_GPU_NODE_CORES_BY_NAME[${node_name}]:-0}"
+}
+
+get_gpu_node_gpu_count() {
+  local node_name="$1"
+  printf "%s\n" "${MLMAN_GPU_NODE_GPU_COUNT_BY_NAME[${node_name}]:-0}"
+}
+
+gpu_node_is_enabled() {
+  local node_name="$1"
+  [[ "${MLMAN_GPU_NODE_ENABLED_BY_NAME[${node_name}]:-false}" == "true" ]]
+}
+
+get_ray_head_node_name() {
+  if [[ -n "${MLMAN_RAY_HEAD_NODE:-}" ]]; then
+    printf "%s\n" "${MLMAN_RAY_HEAD_NODE}"
+    return 0
+  fi
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    printf "%s\n" "${MLMAN_ENABLED_GPU_NODE_NAMES[0]}"
+    return 0
+  fi
+  if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    printf "%s\n" "${MLMAN_GPU_NODE_NAMES[0]}"
+    return 0
+  fi
+  printf "\n"
+}
+
+load_mlman_json_config
+
 ML_MODE_STATE_FILE="${ML_MODE_STATE_FILE:-${ML_MODE_STATE_DIR}/state.env}"
 ML_MODE_POLICY_LOG="${ML_MODE_POLICY_LOG:-${ML_MODE_LOG_DIR}/policy.log}"
+ML_CONTROL_LOCK_FILE="${ML_CONTROL_LOCK_FILE:-${ML_CONTROL_ROOT}/cluster.lock}"
+ML_MODEL_REGISTRY_FILE="${ML_MODEL_REGISTRY_FILE:-${ML_CONTROL_ROOT}/models.tsv}"
+ML_ACTIVE_MODEL_FILE="${ML_ACTIVE_MODEL_FILE:-${ML_CONTROL_ROOT}/active-model.env}"
 
-VM_TRAIN_NAME="${VM_TRAIN_NAME:-vm-train}"
-VM_INFER_NAME="${VM_INFER_NAME:-vm-infer}"
-VM_GPU_1_NAME="${VM_GPU_1_NAME:-vm-gpu-1}"
-VM_GPU_2_NAME="${VM_GPU_2_NAME:-vm-gpu-2}"
-
-HOST_RESERVED_MIB="${HOST_RESERVED_MIB:-30720}"
-VM_MEMORY_LIMIT_MIB="${VM_MEMORY_LIMIT_MIB:-231424}"
-
-VM_GPU_1_MEMORY_MIB="${VM_GPU_1_MEMORY_MIB:-90112}"
-VM_GPU_2_MEMORY_MIB="${VM_GPU_2_MEMORY_MIB:-90112}"
-VM_TRAIN_MEMORY_MIB="${VM_TRAIN_MEMORY_MIB:-34816}"
-VM_INFER_MEMORY_MIB="${VM_INFER_MEMORY_MIB:-16384}"
-
-VM_GPU_1_CORES="${VM_GPU_1_CORES:-96}"
-VM_GPU_2_CORES="${VM_GPU_2_CORES:-96}"
-VM_TRAIN_CORES="${VM_TRAIN_CORES:-24}"
-VM_INFER_CORES="${VM_INFER_CORES:-16}"
-
-VM_DEFAULT_SOCKETS="${VM_DEFAULT_SOCKETS:-1}"
-VM_DEFAULT_NUMA="${VM_DEFAULT_NUMA:-1}"
-VM_DEFAULT_CPU_TYPE="${VM_DEFAULT_CPU_TYPE:-host}"
+if [[ -z "${ML_INFER_SSH_HOST}" ]]; then
+  ML_INFER_SSH_HOST="${VM_INFER_NAME}"
+fi
 
 ensure_runtime_dirs() {
   mkdir -p "${ML_MODE_STATE_DIR}" "${ML_MODE_LOG_DIR}"
   if [[ ! -f "${ML_MODE_STATE_FILE}" ]]; then
-    cat >"${ML_MODE_STATE_FILE}" <<EOF
-active_mode=idle
-last_switch_by=init
-last_switch_ts=$(date -Is)
-last_requested_mode=idle
-ram_guard_passed=true
-policy_version=v6
-EOF
+    write_kv_file "${ML_MODE_STATE_FILE}" \
+      active_mode "idle" \
+      last_switch_by "init" \
+      last_switch_ts "$(date -Is)" \
+      last_requested_mode "idle" \
+      ram_guard_passed "true" \
+      policy_version "v8"
   fi
+}
+
+sanitize_single_line() {
+  local value="$1"
+  value="${value//$'\n'/ }"
+  value="${value//$'\r'/ }"
+  printf "%s" "${value}"
+}
+
+write_kv_file() {
+  local file_path="$1"
+  shift
+
+  : >"${file_path}"
+  while [[ $# -ge 2 ]]; do
+    local key="$1"
+    local value="$2"
+    shift 2
+    printf "%s=%s\n" "${key}" "$(sanitize_single_line "${value}")" >>"${file_path}"
+  done
+}
+
+kv_get_or_default() {
+  local file_path="$1"
+  local wanted_key="$2"
+  local default_value="$3"
+  local value
+
+  if value="$(awk -F'=' -v k="${wanted_key}" '$1==k {value=substr($0, index($0, "=")+1); found=1} END {if (!found) exit 1; print value}' "${file_path}" 2>/dev/null)"; then
+    printf "%s\n" "${value}"
+  else
+    printf "%s\n" "${default_value}"
+  fi
+}
+
+ensure_control_dir() {
+  if [[ -d "${ML_CONTROL_ROOT}" ]]; then
+    return 0
+  fi
+  mkdir -p "${ML_CONTROL_ROOT}" 2>/dev/null || {
+    echo "error: cannot create control root: ${ML_CONTROL_ROOT}" >&2
+    return 1
+  }
+}
+
+run_with_control_lock() {
+  local timeout="${ML_CONTROL_LOCK_TIMEOUT_SEC}"
+  ensure_control_dir || return 1
+  (
+    flock -w "${timeout}" 9 || {
+      echo "error: failed to acquire control lock: ${ML_CONTROL_LOCK_FILE}" >&2
+      exit 1
+    }
+    "$@"
+  ) 9>"${ML_CONTROL_LOCK_FILE}"
 }
 
 log_policy() {
@@ -52,8 +364,12 @@ log_policy() {
 
 load_state() {
   ensure_runtime_dirs
-  # shellcheck disable=SC1090
-  source "${ML_MODE_STATE_FILE}"
+  active_mode="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "active_mode" "idle")"
+  last_switch_by="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "last_switch_by" "init")"
+  last_switch_ts="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "last_switch_ts" "")"
+  last_requested_mode="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "last_requested_mode" "idle")"
+  ram_guard_passed="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "ram_guard_passed" "false")"
+  policy_version="$(kv_get_or_default "${ML_MODE_STATE_FILE}" "policy_version" "v8")"
 }
 
 save_state() {
@@ -62,14 +378,43 @@ save_state() {
   local last_requested_mode="$3"
   local ram_guard_passed="$4"
   ensure_runtime_dirs
-  cat >"${ML_MODE_STATE_FILE}" <<EOF
-active_mode=${active_mode}
-last_switch_by=${last_switch_by}
-last_switch_ts=$(date -Is)
-last_requested_mode=${last_requested_mode}
-ram_guard_passed=${ram_guard_passed}
-policy_version=v6
-EOF
+  write_kv_file "${ML_MODE_STATE_FILE}" \
+    active_mode "${active_mode}" \
+    last_switch_by "${last_switch_by}" \
+    last_switch_ts "$(date -Is)" \
+    last_requested_mode "${last_requested_mode}" \
+    ram_guard_passed "${ram_guard_passed}" \
+    policy_version "v8"
+}
+
+save_active_model() {
+  local model_alias="$1"
+  local model_id="$2"
+  local model_tp="$3"
+  local model_pp="$4"
+  local model_gpu_mem_util="$5"
+  local switched_by="$6"
+  ensure_control_dir || return 1
+  write_kv_file "${ML_ACTIVE_MODEL_FILE}" \
+    active_model_alias "${model_alias}" \
+    active_model_id "${model_id}" \
+    active_model_tp "${model_tp}" \
+    active_model_pp "${model_pp}" \
+    active_model_gpu_memory_utilization "${model_gpu_mem_util}" \
+    switched_by "${switched_by}" \
+    switched_at "$(date -Is)"
+}
+
+load_active_model() {
+  [[ -f "${ML_ACTIVE_MODEL_FILE}" ]] || return 1
+  active_model_alias="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "active_model_alias" "")"
+  active_model_id="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "active_model_id" "")"
+  active_model_tp="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "active_model_tp" "")"
+  active_model_pp="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "active_model_pp" "")"
+  active_model_gpu_memory_utilization="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "active_model_gpu_memory_utilization" "")"
+  switched_by="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "switched_by" "")"
+  switched_at="$(kv_get_or_default "${ML_ACTIVE_MODEL_FILE}" "switched_at" "")"
+  [[ -n "${active_model_id}" ]]
 }
 
 require_qm() {
@@ -104,6 +449,40 @@ vm_status() {
 vm_is_running() {
   local vmid="$1"
   [[ "$(vm_status "${vmid}")" == "running" ]]
+}
+
+current_runtime_mode() {
+  local train_vmid infer_vmid train_running infer_running
+  train_vmid="$(require_vmid "${VM_TRAIN_NAME}")"
+  infer_vmid="$(require_vmid "${VM_INFER_NAME}")"
+
+  train_running=false
+  infer_running=false
+  vm_is_running "${train_vmid}" && train_running=true
+  vm_is_running "${infer_vmid}" && infer_running=true
+
+  if [[ "${train_running}" == "true" && "${infer_running}" == "true" ]]; then
+    printf "conflict\n"
+    return 0
+  fi
+  if [[ "${train_running}" == "true" ]]; then
+    printf "train\n"
+    return 0
+  fi
+  if [[ "${infer_running}" == "true" ]]; then
+    printf "infer\n"
+    return 0
+  fi
+  printf "idle\n"
+}
+
+inferctl_exec() {
+  local target="${ML_INFER_SSH_USER}@${ML_INFER_SSH_HOST}"
+  command -v ssh >/dev/null 2>&1 || {
+    echo "error: ssh not found; cannot reach vm-infer control plane" >&2
+    return 1
+  }
+  ssh -o BatchMode=yes -o ConnectTimeout="${ML_SSH_CONNECT_TIMEOUT_SEC}" "${target}" "$@"
 }
 
 stop_vm_graceful_then_force() {
@@ -179,76 +558,78 @@ ram_guard_check() {
 }
 
 memory_plan_check() {
-  local gpu1 gpu2 train infer sum
-  gpu1="$(require_vmid "${VM_GPU_1_NAME}")"
-  gpu2="$(require_vmid "${VM_GPU_2_NAME}")"
-  train="$(require_vmid "${VM_TRAIN_NAME}")"
-  infer="$(require_vmid "${VM_INFER_NAME}")"
+  local vm_name vmid expected_mem actual_mem expected_sum actual_sum
+  local -a profile_nodes=()
+  expected_sum=0
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
 
-  local gpu1_mem gpu2_mem train_mem infer_mem
-  gpu1_mem="$(get_vm_memory_mib "${gpu1}")"
-  gpu2_mem="$(get_vm_memory_mib "${gpu2}")"
-  train_mem="$(get_vm_memory_mib "${train}")"
-  infer_mem="$(get_vm_memory_mib "${infer}")"
+  for vm_name in "${profile_nodes[@]}"; do
+    vmid="$(require_vmid "${vm_name}")"
+    expected_mem="$(get_gpu_node_memory_mib "${vm_name}")"
+    actual_mem="$(get_vm_memory_mib "${vmid}")"
+    [[ "${actual_mem}" == "${expected_mem}" ]] || return 1
+    expected_sum=$((expected_sum + expected_mem))
+  done
 
-  [[ "${gpu1_mem}" == "${VM_GPU_1_MEMORY_MIB}" ]] || return 1
-  [[ "${gpu2_mem}" == "${VM_GPU_2_MEMORY_MIB}" ]] || return 1
-  [[ "${train_mem}" == "${VM_TRAIN_MEMORY_MIB}" ]] || return 1
-  [[ "${infer_mem}" == "${VM_INFER_MEMORY_MIB}" ]] || return 1
+  vmid="$(require_vmid "${VM_TRAIN_NAME}")"
+  actual_mem="$(get_vm_memory_mib "${vmid}")"
+  [[ "${actual_mem}" == "${VM_TRAIN_MEMORY_MIB}" ]] || return 1
+  expected_sum=$((expected_sum + VM_TRAIN_MEMORY_MIB))
 
-  sum=$((gpu1_mem + gpu2_mem + train_mem + infer_mem))
-  ((sum == VM_MEMORY_LIMIT_MIB))
+  vmid="$(require_vmid "${VM_INFER_NAME}")"
+  actual_mem="$(get_vm_memory_mib "${vmid}")"
+  [[ "${actual_mem}" == "${VM_INFER_MEMORY_MIB}" ]] || return 1
+  expected_sum=$((expected_sum + VM_INFER_MEMORY_MIB))
+
+  actual_sum="${VM_MEMORY_LIMIT_MIB}"
+  ((actual_sum >= expected_sum))
 }
 
 cpu_plan_check() {
-  local gpu1 gpu2 train infer
-  gpu1="$(require_vmid "${VM_GPU_1_NAME}")"
-  gpu2="$(require_vmid "${VM_GPU_2_NAME}")"
-  train="$(require_vmid "${VM_TRAIN_NAME}")"
-  infer="$(require_vmid "${VM_INFER_NAME}")"
+  local vm_name vmid
+  local cpu sockets cores numa expected_cores
+  local -a profile_nodes=()
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
 
-  local gpu1_cpu gpu2_cpu train_cpu infer_cpu
-  local gpu1_sockets gpu2_sockets train_sockets infer_sockets
-  local gpu1_cores gpu2_cores train_cores infer_cores
-  local gpu1_numa gpu2_numa train_numa infer_numa
+  for vm_name in "${profile_nodes[@]}"; do
+    vmid="$(require_vmid "${vm_name}")"
+    cpu="$(get_vm_config_value "${vmid}" "cpu")"
+    sockets="$(get_vm_config_value "${vmid}" "sockets")"
+    cores="$(get_vm_config_value "${vmid}" "cores")"
+    numa="$(get_vm_config_value "${vmid}" "numa")"
+    expected_cores="$(get_gpu_node_cores "${vm_name}")"
 
-  gpu1_cpu="$(get_vm_config_value "${gpu1}" "cpu")"
-  gpu2_cpu="$(get_vm_config_value "${gpu2}" "cpu")"
-  train_cpu="$(get_vm_config_value "${train}" "cpu")"
-  infer_cpu="$(get_vm_config_value "${infer}" "cpu")"
+    [[ "${cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+    [[ "${sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+    [[ "${cores}" == "${expected_cores}" ]] || return 1
+    [[ "${numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
+  done
 
-  gpu1_sockets="$(get_vm_config_value "${gpu1}" "sockets")"
-  gpu2_sockets="$(get_vm_config_value "${gpu2}" "sockets")"
-  train_sockets="$(get_vm_config_value "${train}" "sockets")"
-  infer_sockets="$(get_vm_config_value "${infer}" "sockets")"
+  vmid="$(require_vmid "${VM_TRAIN_NAME}")"
+  cpu="$(get_vm_config_value "${vmid}" "cpu")"
+  sockets="$(get_vm_config_value "${vmid}" "sockets")"
+  cores="$(get_vm_config_value "${vmid}" "cores")"
+  numa="$(get_vm_config_value "${vmid}" "numa")"
+  [[ "${cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+  [[ "${sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+  [[ "${cores}" == "${VM_TRAIN_CORES}" ]] || return 1
+  [[ "${numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
 
-  gpu1_cores="$(get_vm_config_value "${gpu1}" "cores")"
-  gpu2_cores="$(get_vm_config_value "${gpu2}" "cores")"
-  train_cores="$(get_vm_config_value "${train}" "cores")"
-  infer_cores="$(get_vm_config_value "${infer}" "cores")"
-
-  gpu1_numa="$(get_vm_config_value "${gpu1}" "numa")"
-  gpu2_numa="$(get_vm_config_value "${gpu2}" "numa")"
-  train_numa="$(get_vm_config_value "${train}" "numa")"
-  infer_numa="$(get_vm_config_value "${infer}" "numa")"
-
-  [[ "${gpu1_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
-  [[ "${gpu2_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
-  [[ "${train_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
-  [[ "${infer_cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
-
-  [[ "${gpu1_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
-  [[ "${gpu2_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
-  [[ "${train_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
-  [[ "${infer_sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
-
-  [[ "${gpu1_cores}" == "${VM_GPU_1_CORES}" ]] || return 1
-  [[ "${gpu2_cores}" == "${VM_GPU_2_CORES}" ]] || return 1
-  [[ "${train_cores}" == "${VM_TRAIN_CORES}" ]] || return 1
-  [[ "${infer_cores}" == "${VM_INFER_CORES}" ]] || return 1
-
-  [[ "${gpu1_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
-  [[ "${gpu2_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
-  [[ "${train_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
-  [[ "${infer_numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
+  vmid="$(require_vmid "${VM_INFER_NAME}")"
+  cpu="$(get_vm_config_value "${vmid}" "cpu")"
+  sockets="$(get_vm_config_value "${vmid}" "sockets")"
+  cores="$(get_vm_config_value "${vmid}" "cores")"
+  numa="$(get_vm_config_value "${vmid}" "numa")"
+  [[ "${cpu}" == "${VM_DEFAULT_CPU_TYPE}" ]] || return 1
+  [[ "${sockets}" == "${VM_DEFAULT_SOCKETS}" ]] || return 1
+  [[ "${cores}" == "${VM_INFER_CORES}" ]] || return 1
+  [[ "${numa}" == "${VM_DEFAULT_NUMA}" ]] || return 1
 }

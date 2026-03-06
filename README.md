@@ -106,16 +106,12 @@ Optional (platform-dependent): `nvidia-smi`, `rocm-smi`/`rocminfo`, `pip`, `sudo
 
 ### `proxmox/` automation
 
-Implements 4GPU-2VM-ITex policy:
-- VM names: `vm-gpu-1`, `vm-gpu-2`, `vm-train`, `vm-infer`
+Implements `mlman` policy layer for Proxmox ML clusters:
+- JSON config: `/etc/mlman/mlman.conf`
+- dynamic GPU VM list via `gpu_nodes[]` (horizontal scaling)
 - mutual exclusion for `vm-train` / `vm-infer` via hookscript + watchdog
-- `idle` when both modes are stopped
-- RAM plan in MiB:
-  - `vm-gpu-1=90112`
-  - `vm-gpu-2=90112`
-  - `vm-train=34816`
-- `vm-infer=16384`
-- RAM guard: running sum must stay `<= 231424` MiB
+- `idle` mode when both control VMs are stopped
+- RAM/CPU profile checks from config values (not hardcoded in scripts)
 
 Details and setup steps:
 - `proxmox/README.md`
@@ -126,8 +122,15 @@ Proxmox-specific audits:
 - `proxmox/audit/gpu-audit.sh`
 - `proxmox/audit/gpu-test.sh`
 
-Command examples after install: `mlmode train|infer|stop|status|check`.
-Resource profile apply command: `sudo mlmode apply-profile`.
+Command examples after install: `mlman train|infer|stop|status|check`.
+Resource profile apply command: `sudo mlman apply-profile`.
+Model operations via vm-infer control plane:
+- `mlman model-list`
+- `mlman model-use <alias>` (defaults from `/etc/mlman/mlman.conf`)
+- `mlman model-current`
+- `mlman model-status` (defaults from `/etc/mlman/mlman.conf`)
+- `mlman model-use <alias> --nodes vm-gpu-1,vm-gpu-3 --head-node vm-gpu-1 --net-if eth0`
+
 
 ## Quick Start
 

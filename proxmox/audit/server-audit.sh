@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SCRIPT="${SCRIPT_DIR}/../watchdog/ml-mode-common.sh"
+if [[ ! -f "${COMMON_SCRIPT}" ]]; then
+  COMMON_SCRIPT="/usr/local/sbin/ml-mode-common.sh"
+fi
+# shellcheck source=../watchdog/ml-mode-common.sh
+source "${COMMON_SCRIPT}"
+
 hr() { printf "\n%s\n" "============================================================"; }
 cmd() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
-  cat <<'EOU'
+  cat <<EOF
 Usage: server-audit.sh [--help]
 
-Proxmox-oriented server audit for the architecture:
-- vm-gpu-1, vm-gpu-2, vm-train, vm-infer
-- shared storage at /mnt/shared-storage/mlshare
-- policy watchdog via ml-mode-watchdog.timer
-EOU
+Proxmox-oriented server audit for mlman architecture from:
+  ${MLMAN_CONFIG_JSON}
+EOF
 }
 
 if [[ $# -gt 0 ]]; then
@@ -22,26 +28,25 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-expected_names=(vm-gpu-1 vm-gpu-2 vm-train vm-infer)
+declare -a profile_gpu_nodes=()
+if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+  profile_gpu_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+else
+  profile_gpu_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+fi
 
-declare -A expected_memory=(
-  [vm-gpu-1]=90112
-  [vm-gpu-2]=90112
-  [vm-train]=34816
-  [vm-infer]=16384
-)
+declare -a expected_names=("${profile_gpu_nodes[@]}" "${VM_TRAIN_NAME}" "${VM_INFER_NAME}")
+declare -A expected_memory=()
+declare -A expected_cores=()
 
-declare -A expected_cores=(
-  [vm-gpu-1]=96
-  [vm-gpu-2]=96
-  [vm-train]=24
-  [vm-infer]=16
-)
-
-resolve_vmid_by_name() {
-  local name="$1"
-  qm list | awk -v vmname="$name" 'NR>1 && $2 == vmname {print $1; exit}'
-}
+for vm_name in "${profile_gpu_nodes[@]}"; do
+  expected_memory["${vm_name}"]="$(get_gpu_node_memory_mib "${vm_name}")"
+  expected_cores["${vm_name}"]="$(get_gpu_node_cores "${vm_name}")"
+done
+expected_memory["${VM_TRAIN_NAME}"]="${VM_TRAIN_MEMORY_MIB}"
+expected_memory["${VM_INFER_NAME}"]="${VM_INFER_MEMORY_MIB}"
+expected_cores["${VM_TRAIN_NAME}"]="${VM_TRAIN_CORES}"
+expected_cores["${VM_INFER_NAME}"]="${VM_INFER_CORES}"
 
 cfg_value() {
   local vmid="$1"
@@ -52,6 +57,12 @@ cfg_value() {
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
 echo "Date: $(date -Is)"
 echo "User: $(id -un) (uid=$(id -u))"
+
+hr
+echo "[Config]"
+echo "MLMAN_CONFIG_JSON=${MLMAN_CONFIG_JSON}"
+echo "GPU nodes: ${MLMAN_GPU_NODE_NAMES[*]}"
+echo "Enabled GPU nodes: ${MLMAN_ENABLED_GPU_NODE_NAMES[*]}"
 
 hr
 echo "[Platform]"

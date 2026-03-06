@@ -2,14 +2,24 @@
 set -u
 set -o pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SCRIPT="${SCRIPT_DIR}/../watchdog/ml-mode-common.sh"
+if [[ ! -f "${COMMON_SCRIPT}" ]]; then
+  COMMON_SCRIPT="/usr/local/sbin/ml-mode-common.sh"
+fi
+# shellcheck source=../watchdog/ml-mode-common.sh
+source "${COMMON_SCRIPT}"
+
 usage() {
-  cat <<'EOU'
+  cat <<EOF
 Usage: gpu-test.sh [--help]
 
-Proxmox architecture test suite for:
-- vm-gpu-1, vm-gpu-2, vm-train, vm-infer
-- CPU/RAM profile compliance
-- GPU passthrough presence in gpu VMs
+Proxmox architecture test suite for configuration from:
+  ${MLMAN_CONFIG_JSON}
+
+Checks:
+- VM/profile compliance for train/infer + all configured GPU VMs
+- GPU passthrough presence in configured GPU VMs
 - policy controls (hookscript + watchdog)
 - shared-storage layout
 
@@ -17,7 +27,7 @@ Exit codes:
   0  overall PASS
   1  overall FAIL
   2  invalid usage
-EOU
+EOF
 }
 
 if [[ $# -gt 0 ]]; then
@@ -48,11 +58,6 @@ record() {
   ((total += 1))
 }
 
-resolve_vmid_by_name() {
-  local name="$1"
-  qm list | awk -v vmname="$name" 'NR>1 && $2 == vmname {print $1; exit}'
-}
-
 cfg_value() {
   local vmid="$1"
   local key="$2"
@@ -71,7 +76,15 @@ check_required_cmd() {
 
 check_expected_vms() {
   local missing=0
-  for vm_name in vm-gpu-1 vm-gpu-2 vm-train vm-infer; do
+  local vm_name
+  local -a profile_nodes=()
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
+
+  for vm_name in "${profile_nodes[@]}" "${VM_TRAIN_NAME}" "${VM_INFER_NAME}"; do
     vmid="$(resolve_vmid_by_name "$vm_name")"
     if [[ -n "$vmid" ]]; then
       record PASS "vm:$vm_name" "vmid=$vmid"
@@ -84,22 +97,19 @@ check_expected_vms() {
 }
 
 check_resource_profile() {
-  declare -A expected_memory=(
-    [vm-gpu-1]=90112
-    [vm-gpu-2]=90112
-    [vm-train]=34816
-    [vm-infer]=16384
-  )
-  declare -A expected_cores=(
-    [vm-gpu-1]=96
-    [vm-gpu-2]=96
-    [vm-train]=24
-    [vm-infer]=16
-  )
+  local vm_name vmid memory cores cpu sockets numa expected_mem expected_cores
+  local -a profile_nodes=()
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
 
-  for vm_name in vm-gpu-1 vm-gpu-2 vm-train vm-infer; do
+  for vm_name in "${profile_nodes[@]}"; do
     vmid="$(resolve_vmid_by_name "$vm_name")"
     [[ -z "$vmid" ]] && continue
+    expected_mem="$(get_gpu_node_memory_mib "$vm_name")"
+    expected_cores="$(get_gpu_node_cores "$vm_name")"
 
     memory="$(cfg_value "$vmid" memory)"
     cores="$(cfg_value "$vmid" cores)"
@@ -107,30 +117,77 @@ check_resource_profile() {
     sockets="$(cfg_value "$vmid" sockets)"
     numa="$(cfg_value "$vmid" numa)"
 
-    [[ "$memory" == "${expected_memory[$vm_name]}" ]] \
+    [[ "$memory" == "${expected_mem}" ]] \
       && record PASS "profile:$vm_name:memory" "${memory} MiB" \
-      || record FAIL "profile:$vm_name:memory" "expected=${expected_memory[$vm_name]} got=${memory:-unset}"
+      || record FAIL "profile:$vm_name:memory" "expected=${expected_mem} got=${memory:-unset}"
 
-    [[ "$cores" == "${expected_cores[$vm_name]}" ]] \
+    [[ "$cores" == "${expected_cores}" ]] \
       && record PASS "profile:$vm_name:cores" "$cores" \
-      || record FAIL "profile:$vm_name:cores" "expected=${expected_cores[$vm_name]} got=${cores:-unset}"
+      || record FAIL "profile:$vm_name:cores" "expected=${expected_cores} got=${cores:-unset}"
 
-    [[ "$cpu" == "host" ]] \
+    [[ "$cpu" == "${VM_DEFAULT_CPU_TYPE}" ]] \
       && record PASS "profile:$vm_name:cpu" "$cpu" \
-      || record FAIL "profile:$vm_name:cpu" "expected=host got=${cpu:-unset}"
+      || record FAIL "profile:$vm_name:cpu" "expected=${VM_DEFAULT_CPU_TYPE} got=${cpu:-unset}"
 
-    [[ "$sockets" == "1" ]] \
+    [[ "$sockets" == "${VM_DEFAULT_SOCKETS}" ]] \
       && record PASS "profile:$vm_name:sockets" "$sockets" \
-      || record FAIL "profile:$vm_name:sockets" "expected=1 got=${sockets:-unset}"
+      || record FAIL "profile:$vm_name:sockets" "expected=${VM_DEFAULT_SOCKETS} got=${sockets:-unset}"
 
-    [[ "$numa" == "1" ]] \
+    [[ "$numa" == "${VM_DEFAULT_NUMA}" ]] \
       && record PASS "profile:$vm_name:numa" "$numa" \
-      || record FAIL "profile:$vm_name:numa" "expected=1 got=${numa:-unset}"
+      || record FAIL "profile:$vm_name:numa" "expected=${VM_DEFAULT_NUMA} got=${numa:-unset}"
+  done
+
+  for vm_name in "${VM_TRAIN_NAME}" "${VM_INFER_NAME}"; do
+    vmid="$(resolve_vmid_by_name "$vm_name")"
+    [[ -z "$vmid" ]] && continue
+
+    if [[ "${vm_name}" == "${VM_TRAIN_NAME}" ]]; then
+      expected_mem="${VM_TRAIN_MEMORY_MIB}"
+      expected_cores="${VM_TRAIN_CORES}"
+    else
+      expected_mem="${VM_INFER_MEMORY_MIB}"
+      expected_cores="${VM_INFER_CORES}"
+    fi
+
+    memory="$(cfg_value "$vmid" memory)"
+    cores="$(cfg_value "$vmid" cores)"
+    cpu="$(cfg_value "$vmid" cpu)"
+    sockets="$(cfg_value "$vmid" sockets)"
+    numa="$(cfg_value "$vmid" numa)"
+
+    [[ "$memory" == "${expected_mem}" ]] \
+      && record PASS "profile:$vm_name:memory" "${memory} MiB" \
+      || record FAIL "profile:$vm_name:memory" "expected=${expected_mem} got=${memory:-unset}"
+
+    [[ "$cores" == "${expected_cores}" ]] \
+      && record PASS "profile:$vm_name:cores" "$cores" \
+      || record FAIL "profile:$vm_name:cores" "expected=${expected_cores} got=${cores:-unset}"
+
+    [[ "$cpu" == "${VM_DEFAULT_CPU_TYPE}" ]] \
+      && record PASS "profile:$vm_name:cpu" "$cpu" \
+      || record FAIL "profile:$vm_name:cpu" "expected=${VM_DEFAULT_CPU_TYPE} got=${cpu:-unset}"
+
+    [[ "$sockets" == "${VM_DEFAULT_SOCKETS}" ]] \
+      && record PASS "profile:$vm_name:sockets" "$sockets" \
+      || record FAIL "profile:$vm_name:sockets" "expected=${VM_DEFAULT_SOCKETS} got=${sockets:-unset}"
+
+    [[ "$numa" == "${VM_DEFAULT_NUMA}" ]] \
+      && record PASS "profile:$vm_name:numa" "$numa" \
+      || record FAIL "profile:$vm_name:numa" "expected=${VM_DEFAULT_NUMA} got=${numa:-unset}"
   done
 }
 
 check_passthrough_profile() {
-  for vm_name in vm-gpu-1 vm-gpu-2; do
+  local vm_name vmid count
+  local -a profile_nodes=()
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
+
+  for vm_name in "${profile_nodes[@]}"; do
     vmid="$(resolve_vmid_by_name "$vm_name")"
     [[ -z "$vmid" ]] && continue
 
@@ -146,22 +203,22 @@ check_passthrough_profile() {
 }
 
 check_policy_guards() {
-  local train_vmid infer_vmid
-  train_vmid="$(resolve_vmid_by_name vm-train)"
-  infer_vmid="$(resolve_vmid_by_name vm-infer)"
+  local train_vmid infer_vmid train_hook infer_hook
+  train_vmid="$(resolve_vmid_by_name "${VM_TRAIN_NAME}")"
+  infer_vmid="$(resolve_vmid_by_name "${VM_INFER_NAME}")"
 
   if [[ -n "$train_vmid" ]]; then
     train_hook="$(cfg_value "$train_vmid" hookscript)"
     [[ "$train_hook" == "local:snippets/ml-mode-hook.sh" ]] \
-      && record PASS "hook:vm-train" "$train_hook" \
-      || record FAIL "hook:vm-train" "expected local:snippets/ml-mode-hook.sh got=${train_hook:-unset}"
+      && record PASS "hook:${VM_TRAIN_NAME}" "$train_hook" \
+      || record FAIL "hook:${VM_TRAIN_NAME}" "expected local:snippets/ml-mode-hook.sh got=${train_hook:-unset}"
   fi
 
   if [[ -n "$infer_vmid" ]]; then
     infer_hook="$(cfg_value "$infer_vmid" hookscript)"
     [[ "$infer_hook" == "local:snippets/ml-mode-hook.sh" ]] \
-      && record PASS "hook:vm-infer" "$infer_hook" \
-      || record FAIL "hook:vm-infer" "expected local:snippets/ml-mode-hook.sh got=${infer_hook:-unset}"
+      && record PASS "hook:${VM_INFER_NAME}" "$infer_hook" \
+      || record FAIL "hook:${VM_INFER_NAME}" "expected local:snippets/ml-mode-hook.sh got=${infer_hook:-unset}"
   fi
 
   if systemctl is-enabled ml-mode-watchdog.timer >/dev/null 2>&1; then
@@ -186,7 +243,7 @@ check_storage_layout() {
     return
   fi
 
-  for dir in datasets models checkpoints artifacts; do
+  for dir in datasets models checkpoints artifacts logs cache control; do
     if [[ -d "$root/$dir" ]]; then
       record PASS "storage:$dir" "present"
     else
@@ -196,8 +253,21 @@ check_storage_layout() {
 }
 
 check_physical_gpu_count() {
-  local expected actual
-  expected="${EXPECTED_PHYSICAL_GPUS:-4}"
+  local expected actual vm_name
+  local -a profile_nodes=()
+  expected="${EXPECTED_PHYSICAL_GPUS:-0}"
+
+  if [[ "${#MLMAN_ENABLED_GPU_NODE_NAMES[@]}" -gt 0 ]]; then
+    profile_nodes=("${MLMAN_ENABLED_GPU_NODE_NAMES[@]}")
+  else
+    profile_nodes=("${MLMAN_GPU_NODE_NAMES[@]}")
+  fi
+
+  if [[ "${expected}" == "0" ]]; then
+    for vm_name in "${profile_nodes[@]}"; do
+      expected=$((expected + $(get_gpu_node_gpu_count "${vm_name}")))
+    done
+  fi
 
   if cmd nvidia-smi; then
     actual="$(nvidia-smi -L 2>/dev/null | wc -l | awk '{print $1}')"

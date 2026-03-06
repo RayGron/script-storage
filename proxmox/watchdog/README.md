@@ -1,47 +1,70 @@
-# Proxmox ML Mode (Plan v6)
+# Proxmox MLMAN (JSON Config)
 
 This directory implements:
-- GUI-first control in Proxmox
+- `mlman` control CLI for Proxmox ML mode switching
 - mutual exclusion between `vm-train` and `vm-infer`
-- `idle` mode when both are stopped
-- RAM guard in MiB with fixed memory plan
+- dynamic GPU node inventory for Ray/vLLM inference
+- watchdog + hookscript policy enforcement
+- acceptance and audit helpers using one shared config model
 
-## Memory plan (MiB)
+## Config Source
 
-- `vm-gpu-1`: `90112`
-- `vm-gpu-2`: `90112`
-- `vm-train`: `34816`
-- `vm-infer`: `16384`
+Default config file:
+- `/etc/mlman/mlman.conf` (JSON)
+- `limits.vm_memory_limit_mib=0` means "auto-calc from configured VM memory profile sum"
+- `jq` must be installed where `mlman`/`inferctl.sh` run
 
-Total VM memory: `231424` MiB  
-Reserved for Proxmox host: `30720` MiB  
-Total host memory: `262144` MiB
+Default model registry file:
+- `/mnt/shared-storage/mlshare/control/models.tsv`
+
+Default active model state:
+- `/mnt/shared-storage/mlshare/control/active-model.env`
+
+Example config template:
+- `mlman.conf.example`
+
+Minimal JSON shape:
+
+```json
+{
+  "vm_names": { "train": "vm-train", "infer": "vm-infer" },
+  "gpu_nodes": [
+    { "name": "vm-gpu-1", "ip": "192.168.88.101", "ssh_user": "mlops1", "gpu_count": 2, "memory_mib": 90112, "cores": 96, "enabled": true },
+    { "name": "vm-gpu-2", "ip": "192.168.88.102", "ssh_user": "mlops2", "gpu_count": 2, "memory_mib": 90112, "cores": 96, "enabled": true }
+  ],
+  "inference": { "ray_head_node": "vm-gpu-1", "net_if": "eth0" }
+}
+```
+
+`gpu_nodes[]` can contain any number of GPU VMs, which enables horizontal scaling.
 
 ## Files
 
-- `ml-mode-common.sh`: shared logic
-- `ml-mode.sh`: CLI helper (`train|infer|stop|status|check|apply-profile`)
-- `mlmode`: command wrapper for `mlmode train|infer|stop|status|check|apply-profile`
-- `ml-mode-hook.sh`: hookscript (`pre-start` enforcement)
+- `ml-mode-common.sh`: shared config/state/helpers (JSON parsing via `jq`)
+- `ml-mode.sh`: main controller (`train|infer|stop|status|check|apply-profile|model-*`)
+- `mlman`: preferred wrapper command
+- `inferctl.sh`: remote inference control (Ray/vLLM) on `vm-infer`
+- `ml-mode-hook.sh`: Proxmox hookscript (`pre-start` conflict prevention)
 - `ml-mode-watchdog.sh`: anti-race watchdog
 - `ml-mode-watchdog.service`: systemd service
-- `ml-mode-watchdog.timer`: systemd timer (every 10s)
-- `ml-mode-acceptance.sh`: acceptance checks
+- `ml-mode-watchdog.timer`: systemd timer
+- `ml-mode-acceptance.sh`: profile and RAM guard checks
+- `models.example.tsv`: model alias registry example
 
-## Install on Proxmox host
-
-Copy scripts:
+## Install on Proxmox Host
 
 ```bash
+sudo install -d -m 0755 /usr/local/sbin /usr/local/bin /etc/mlman
 sudo install -m 0755 proxmox/watchdog/ml-mode.sh /usr/local/sbin/ml-mode.sh
-sudo install -m 0755 proxmox/watchdog/mlmode /usr/local/bin/mlmode
+sudo install -m 0755 proxmox/watchdog/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
 sudo install -m 0755 proxmox/watchdog/ml-mode-hook.sh /usr/local/sbin/ml-mode-hook.sh
 sudo install -m 0755 proxmox/watchdog/ml-mode-watchdog.sh /usr/local/sbin/ml-mode-watchdog.sh
 sudo install -m 0755 proxmox/watchdog/ml-mode-acceptance.sh /usr/local/sbin/ml-mode-acceptance.sh
-sudo install -m 0644 proxmox/watchdog/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
+sudo install -m 0755 proxmox/watchdog/mlman /usr/local/bin/mlman
+sudo install -m 0644 proxmox/watchdog/mlman.conf.example /etc/mlman/mlman.conf
 ```
 
-Install systemd units:
+Systemd:
 
 ```bash
 sudo install -m 0644 proxmox/watchdog/ml-mode-watchdog.service /etc/systemd/system/ml-mode-watchdog.service
@@ -50,63 +73,56 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ml-mode-watchdog.timer
 ```
 
-## Configure VM memory (MiB)
+## Install inferctl on `vm-infer`
 
-Resolve VMIDs:
-
-```bash
-sudo qm list
-```
-
-Set CPU + memory values in one command:
+`mlman` calls `inferctl.sh` remotely over SSH on the infer control VM.
 
 ```bash
-sudo mlmode apply-profile
+sudo install -d -m 0755 /usr/local/sbin /etc/mlman
+sudo install -m 0755 proxmox/watchdog/inferctl.sh /usr/local/sbin/inferctl.sh
+sudo install -m 0755 proxmox/watchdog/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
+sudo install -m 0644 proxmox/watchdog/mlman.conf.example /etc/mlman/mlman.conf
 ```
 
-This applies:
-- `cpu=host`
-- `sockets=1`
-- `numa=1`
-- `cores`: `vm-gpu-1=96`, `vm-gpu-2=96`, `vm-train=24`, `vm-infer=16`
-- `memory/balloon`: `90112/90112/34816/16384` MiB
-- `agent=1`
+## Hookscript Setup
 
-## Attach hookscript to control-plane VMs
+Attach hookscript to control-plane VMs:
 
 ```bash
 sudo qm set <vmid-vm-train> --hookscript local:snippets/ml-mode-hook.sh
 sudo qm set <vmid-vm-infer> --hookscript local:snippets/ml-mode-hook.sh
 ```
 
-Notes:
-- Put `ml-mode-hook.sh` into a Proxmox snippet storage path.
-- The hookscript runs on every start from GUI/CLI/API.
+## Daily Use
 
-## Daily use (GUI-first)
-
-- Start `vm-train` from GUI: hookscript stops `vm-infer` first.
-- Start `vm-infer` from GUI: hookscript stops `vm-train` first.
-- Stop both manually in GUI: state becomes `idle`, watchdog does not auto-start anything.
-
-Optional CLI:
+Core mode control:
 
 ```bash
-mlmode train
-mlmode infer
-mlmode stop
-mlmode status
-mlmode check
-mlmode apply-profile
+mlman train
+mlman infer
+mlman stop
+mlman status
+mlman check
+mlman apply-profile
 ```
 
-## Acceptance checks
+Inference model operations:
+
+```bash
+mlman model-list
+mlman model-use qwen3.5-7b
+mlman model-use qwen3.5-7b --nodes vm-gpu-1,vm-gpu-2 --head-node vm-gpu-1 --net-if eth0
+mlman model-current
+mlman model-status
+```
+
+## Acceptance Check
 
 ```bash
 sudo /usr/local/sbin/ml-mode-acceptance.sh
 ```
 
-Expected:
-- memory values match `90112/90112/34816/16384`
-- running memory sum is `<= 231424` MiB
-- CPU profile matches `cpu=host`, `sockets=1`, `numa=1`, cores `96/96/24/16`
+Checks:
+- VM memory values match JSON profile
+- Running VM memory sum is within configured RAM guard limit
+- CPU profile matches configured defaults and per-VM core plan

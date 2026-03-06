@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Friendly command wrapper:
-#   mlmode train|infer|stop|status|check
+#   mlman train|infer|stop|status|check|apply-profile|model-*
 
 if command -v ml-mode.sh >/dev/null 2>&1; then
   exec ml-mode.sh "$@"

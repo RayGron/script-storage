@@ -1,0 +1,70 @@
+{
+  "control": {
+    "state_dir": "/var/lib/mlman",
+    "log_dir": "/var/log/mlman",
+    "root": "/mnt/shared-storage/mlshare/control",
+    "lock_timeout_sec": 60,
+    "infer_ssh_host": "vm-infer",
+    "infer_ssh_user": "root",
+    "inferctl_path": "/usr/local/sbin/inferctl.sh",
+    "ssh_connect_timeout_sec": 10
+  },
+  "vm_names": {
+    "train": "vm-train",
+    "infer": "vm-infer"
+  },
+  "resource_defaults": {
+    "cpu": "host",
+    "sockets": 1,
+    "numa": 1
+  },
+  "profiles": {
+    "train": {
+      "memory_mib": 34816,
+      "cores": 24
+    },
+    "infer": {
+      "memory_mib": 16384,
+      "cores": 16
+    }
+  },
+  "limits": {
+    "host_reserved_mib": 30720,
+    "vm_memory_limit_mib": 0
+  },
+  "gpu_nodes": [
+    {
+      "name": "vm-gpu-1",
+      "ip": "192.168.88.101",
+      "ssh_user": "mlops1",
+      "gpu_count": 2,
+      "memory_mib": 90112,
+      "cores": 96,
+      "enabled": true
+    },
+    {
+      "name": "vm-gpu-2",
+      "ip": "192.168.88.102",
+      "ssh_user": "mlops2",
+      "gpu_count": 2,
+      "memory_mib": 90112,
+      "cores": 96,
+      "enabled": true
+    }
+  ],
+  "inference": {
+    "ray_head_node": "vm-gpu-1",
+    "net_if": "eth0",
+    "venv_path": "~/venv-vllm",
+    "hf_home": "/mnt/shared/models/.hf",
+    "huggingface_hub_cache": "/mnt/shared/models/.hf/hub",
+    "transformers_cache": "/mnt/shared/models/.hf/transformers",
+    "vllm_download_dir": "/mnt/shared/models/.vllm",
+    "infer_log_dir": "/mnt/shared/logs/infer",
+    "ray_port": 6379,
+    "ray_dashboard_port": 8265,
+    "vllm_port": 8000,
+    "vllm_healthcheck_retries": 30,
+    "vllm_healthcheck_interval_sec": 2
+  }
+}
