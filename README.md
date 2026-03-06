@@ -107,7 +107,8 @@ Optional (platform-dependent): `nvidia-smi`, `rocm-smi`/`rocminfo`, `pip`, `sudo
 ### `proxmox/` automation
 
 Implements `mlman` policy layer for Proxmox ML clusters:
-- JSON config: `/etc/mlman/mlman.conf`
+- host config: `/etc/mlman/mlman.conf`
+- infer config on `vm-infer`: `/etc/mlman/infer.conf`
 - dynamic GPU VM list via `gpu_nodes[]` (horizontal scaling)
 - mutual exclusion for `vm-train` / `vm-infer` via hookscript + watchdog
 - `idle` mode when both control VMs are stopped
@@ -126,9 +127,9 @@ Command examples after install: `mlman train|infer|stop|status|check`.
 Resource profile apply command: `sudo mlman apply-profile`.
 Model operations via vm-infer control plane:
 - `mlman model-list`
-- `mlman model-use <alias>` (defaults from `/etc/mlman/mlman.conf`)
+- `mlman model-use <alias>` (host policy from `/etc/mlman/mlman.conf`, runtime defaults from `/etc/mlman/infer.conf` on `vm-infer`)
 - `mlman model-current`
-- `mlman model-status` (defaults from `/etc/mlman/mlman.conf`)
+- `mlman model-status` (runtime defaults from `/etc/mlman/infer.conf` on `vm-infer`)
 - `mlman model-use <alias> --nodes vm-gpu-1,vm-gpu-3 --head-node vm-gpu-1 --net-if eth0`
 
 

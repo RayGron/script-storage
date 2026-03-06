@@ -36,8 +36,10 @@ Model registry format (${ML_MODEL_REGISTRY_FILE}):
 Example:
   qwen3.5-7b|Qwen/Qwen3.5-7B-Instruct|2|2|0.90
 
-Defaults for nodes/network/head are loaded from:
+Host policy defaults are loaded from:
   ${MLMAN_CONFIG_JSON}
+Inference node/runtime defaults are loaded remotely from:
+  ${ML_INFER_CONFIG_PATH_REMOTE}
 EOF
 }
 

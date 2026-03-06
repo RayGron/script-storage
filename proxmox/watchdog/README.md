@@ -5,14 +5,18 @@ This directory implements:
 - mutual exclusion between `vm-train` and `vm-infer`
 - dynamic GPU node inventory for Ray/vLLM inference
 - watchdog + hookscript policy enforcement
-- acceptance and audit helpers using one shared config model
+- acceptance and audit helpers using separate host/inference config files
 
 ## Config Source
 
-Default config file:
-- `/etc/mlman/mlman.conf` (JSON)
+Host config file:
+- `/etc/mlman/mlman.conf` (JSON, used by `mlman`, hookscript, watchdog, audit)
 - `limits.vm_memory_limit_mib=0` means "auto-calc from configured VM memory profile sum"
-- `jq` must be installed where `mlman`/`inferctl.sh` run
+
+Inference config file on `vm-infer`:
+- `/etc/mlman/infer.conf` (JSON, used by `inferctl.sh`)
+
+- `jq` must be installed where `mlman` or `inferctl.sh` run
 
 Default model registry file:
 - `/mnt/shared-storage/mlshare/control/models.tsv`
@@ -20,23 +24,34 @@ Default model registry file:
 Default active model state:
 - `/mnt/shared-storage/mlshare/control/active-model.env`
 
-Example config template:
+Example config templates:
 - `mlman.conf.example`
+- `infer.conf.example`
 
-Minimal JSON shape:
+Minimal `mlman.conf` shape:
 
 ```json
 {
   "vm_names": { "train": "vm-train", "infer": "vm-infer" },
+  "control": { "infer_config_path": "/etc/mlman/infer.conf" },
   "gpu_nodes": [
-    { "name": "vm-gpu-1", "ip": "192.168.88.101", "ssh_user": "mlops1", "gpu_count": 2, "memory_mib": 90112, "cores": 96, "enabled": true },
-    { "name": "vm-gpu-2", "ip": "192.168.88.102", "ssh_user": "mlops2", "gpu_count": 2, "memory_mib": 90112, "cores": 96, "enabled": true }
+    { "name": "vm-gpu-1", "ip": "192.168.88.101", "ssh_user": "mlops1", "gpu_count": 2, "memory_mib": 90112, "cores": 96, "enabled": true }
+  ]
+}
+```
+
+Minimal `infer.conf` shape:
+
+```json
+{
+  "gpu_nodes": [
+    { "name": "vm-gpu-1", "ip": "192.168.88.101", "ssh_user": "mlops1", "gpu_count": 2, "enabled": true }
   ],
   "inference": { "ray_head_node": "vm-gpu-1", "net_if": "eth0" }
 }
 ```
 
-`gpu_nodes[]` can contain any number of GPU VMs, which enables horizontal scaling.
+`gpu_nodes[]` can contain any number of GPU VMs, which enables horizontal scaling. The list is intentionally duplicated across the two configs because host policy and infer runtime are now separated.
 
 ## Files
 
@@ -81,7 +96,7 @@ sudo systemctl enable --now ml-mode-watchdog.timer
 sudo install -d -m 0755 /usr/local/sbin /etc/mlman
 sudo install -m 0755 proxmox/watchdog/inferctl.sh /usr/local/sbin/inferctl.sh
 sudo install -m 0755 proxmox/watchdog/ml-mode-common.sh /usr/local/sbin/ml-mode-common.sh
-sudo install -m 0644 proxmox/watchdog/mlman.conf.example /etc/mlman/mlman.conf
+sudo install -m 0644 proxmox/watchdog/infer.conf.example /etc/mlman/infer.conf
 ```
 
 ## Hookscript Setup

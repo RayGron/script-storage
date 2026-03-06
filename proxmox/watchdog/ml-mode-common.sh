@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Shared helpers for mlman, hookscript, and watchdog.
+# Shared helpers for mlman, hookscript, watchdog, and inferctl.
 
+MLMAN_CONFIG_ROLE="${MLMAN_CONFIG_ROLE:-host}"
 MLMAN_CONFIG_JSON="${MLMAN_CONFIG_JSON:-/etc/mlman/mlman.conf}"
+INFER_CONFIG_JSON="${INFER_CONFIG_JSON:-/etc/mlman/infer.conf}"
+MLMAN_ACTIVE_CONFIG_JSON=""
 
 # Legacy compatibility alias.
 MLMAN_CONF_FILE="${MLMAN_CONF_FILE:-${MLMAN_CONFIG_JSON}}"
@@ -48,8 +51,7 @@ resolve_gpu_defaults_from_common_user() {
   fi
 }
 
-load_mlman_json_config() {
-  # Baseline defaults.
+load_shared_config_defaults() {
   ML_MODE_STATE_DIR="${ML_MODE_STATE_DIR:-/var/lib/mlman}"
   ML_MODE_LOG_DIR="${ML_MODE_LOG_DIR:-/var/log/mlman}"
   ML_CONTROL_ROOT="${ML_CONTROL_ROOT:-/mnt/shared-storage/mlshare/control}"
@@ -57,6 +59,7 @@ load_mlman_json_config() {
   ML_INFER_SSH_USER="${ML_INFER_SSH_USER:-root}"
   ML_INFER_SSH_HOST="${ML_INFER_SSH_HOST:-}"
   ML_INFERCTL_PATH="${ML_INFERCTL_PATH:-/usr/local/sbin/inferctl.sh}"
+  ML_INFER_CONFIG_PATH_REMOTE="${ML_INFER_CONFIG_PATH_REMOTE:-/etc/mlman/infer.conf}"
   ML_SSH_CONNECT_TIMEOUT_SEC="${ML_SSH_CONNECT_TIMEOUT_SEC:-10}"
 
   VM_TRAIN_NAME="${VM_TRAIN_NAME:-vm-train}"
@@ -90,65 +93,24 @@ load_mlman_json_config() {
   MLMAN_DEFAULT_GPU1_USER="${MLMAN_DEFAULT_GPU1_USER:-}"
   MLMAN_DEFAULT_GPU2_USER="${MLMAN_DEFAULT_GPU2_USER:-}"
   MLMAN_DEFAULT_NET_IF="${MLMAN_DEFAULT_NET_IF:-eth0}"
+}
 
-  if [[ ! -f "${MLMAN_CONFIG_JSON}" ]]; then
-    resolve_gpu_defaults_from_common_user
-    seed_default_gpu_nodes
-    return 0
-  fi
-
+require_json_config_tools() {
   command -v jq >/dev/null 2>&1 || {
-    echo "error: jq is required to parse JSON config: ${MLMAN_CONFIG_JSON}" >&2
+    echo "error: jq is required to parse JSON config" >&2
     exit 1
   }
+}
 
-  jq -e . "${MLMAN_CONFIG_JSON}" >/dev/null 2>&1 || {
-    echo "error: invalid JSON config: ${MLMAN_CONFIG_JSON}" >&2
+validate_json_config() {
+  local config_path="$1"
+  jq -e . "${config_path}" >/dev/null 2>&1 || {
+    echo "error: invalid JSON config: ${config_path}" >&2
     exit 1
   }
+}
 
-  ML_MODE_STATE_DIR="$(jq -r '.control.state_dir // "/var/lib/mlman"' "${MLMAN_CONFIG_JSON}")"
-  ML_MODE_LOG_DIR="$(jq -r '.control.log_dir // "/var/log/mlman"' "${MLMAN_CONFIG_JSON}")"
-  ML_CONTROL_ROOT="$(jq -r '.control.root // "/mnt/shared-storage/mlshare/control"' "${MLMAN_CONFIG_JSON}")"
-  ML_CONTROL_LOCK_TIMEOUT_SEC="$(jq -r '.control.lock_timeout_sec // 60' "${MLMAN_CONFIG_JSON}")"
-  ML_INFER_SSH_USER="$(jq -r '.control.infer_ssh_user // "root"' "${MLMAN_CONFIG_JSON}")"
-  ML_INFER_SSH_HOST="$(jq -r '.control.infer_ssh_host // empty' "${MLMAN_CONFIG_JSON}")"
-  ML_INFERCTL_PATH="$(jq -r '.control.inferctl_path // "/usr/local/sbin/inferctl.sh"' "${MLMAN_CONFIG_JSON}")"
-  ML_SSH_CONNECT_TIMEOUT_SEC="$(jq -r '.control.ssh_connect_timeout_sec // 10' "${MLMAN_CONFIG_JSON}")"
-
-  VM_TRAIN_NAME="$(jq -r '.vm_names.train // "vm-train"' "${MLMAN_CONFIG_JSON}")"
-  VM_INFER_NAME="$(jq -r '.vm_names.infer // "vm-infer"' "${MLMAN_CONFIG_JSON}")"
-  VM_TRAIN_MEMORY_MIB="$(jq -r '.profiles.train.memory_mib // 34816' "${MLMAN_CONFIG_JSON}")"
-  VM_INFER_MEMORY_MIB="$(jq -r '.profiles.infer.memory_mib // 16384' "${MLMAN_CONFIG_JSON}")"
-  VM_TRAIN_CORES="$(jq -r '.profiles.train.cores // 24' "${MLMAN_CONFIG_JSON}")"
-  VM_INFER_CORES="$(jq -r '.profiles.infer.cores // 16' "${MLMAN_CONFIG_JSON}")"
-  VM_DEFAULT_CPU_TYPE="$(jq -r '.resource_defaults.cpu // "host"' "${MLMAN_CONFIG_JSON}")"
-  VM_DEFAULT_SOCKETS="$(jq -r '.resource_defaults.sockets // 1' "${MLMAN_CONFIG_JSON}")"
-  VM_DEFAULT_NUMA="$(jq -r '.resource_defaults.numa // 1' "${MLMAN_CONFIG_JSON}")"
-
-  HOST_RESERVED_MIB="$(jq -r '.limits.host_reserved_mib // 30720' "${MLMAN_CONFIG_JSON}")"
-  VM_MEMORY_LIMIT_MIB="$(jq -r '.limits.vm_memory_limit_mib // 0' "${MLMAN_CONFIG_JSON}")"
-
-  MLMAN_DEFAULT_NET_IF="$(jq -r '.inference.net_if // "eth0"' "${MLMAN_CONFIG_JSON}")"
-  MLMAN_RAY_HEAD_NODE="$(jq -r '.inference.ray_head_node // empty' "${MLMAN_CONFIG_JSON}")"
-  VENV_PATH="$(jq -r '.inference.venv_path // "~/venv-vllm"' "${MLMAN_CONFIG_JSON}")"
-  HF_HOME="$(jq -r '.inference.hf_home // "/mnt/shared/models/.hf"' "${MLMAN_CONFIG_JSON}")"
-  HUGGINGFACE_HUB_CACHE="$(jq -r '.inference.huggingface_hub_cache // "/mnt/shared/models/.hf/hub"' "${MLMAN_CONFIG_JSON}")"
-  TRANSFORMERS_CACHE="$(jq -r '.inference.transformers_cache // "/mnt/shared/models/.hf/transformers"' "${MLMAN_CONFIG_JSON}")"
-  VLLM_DOWNLOAD_DIR="$(jq -r '.inference.vllm_download_dir // "/mnt/shared/models/.vllm"' "${MLMAN_CONFIG_JSON}")"
-  INFER_LOG_DIR="$(jq -r '.inference.infer_log_dir // "/mnt/shared/logs/infer"' "${MLMAN_CONFIG_JSON}")"
-  RAY_PORT="$(jq -r '.inference.ray_port // 6379' "${MLMAN_CONFIG_JSON}")"
-  RAY_DASHBOARD_PORT="$(jq -r '.inference.ray_dashboard_port // 8265' "${MLMAN_CONFIG_JSON}")"
-  VLLM_PORT="$(jq -r '.inference.vllm_port // 8000' "${MLMAN_CONFIG_JSON}")"
-  VLLM_HEALTHCHECK_RETRIES="$(jq -r '.inference.vllm_healthcheck_retries // 30' "${MLMAN_CONFIG_JSON}")"
-  VLLM_HEALTHCHECK_INTERVAL_SEC="$(jq -r '.inference.vllm_healthcheck_interval_sec // 2' "${MLMAN_CONFIG_JSON}")"
-
-  MLMAN_DEFAULT_GPU1_IP=""
-  MLMAN_DEFAULT_GPU2_IP=""
-  MLMAN_DEFAULT_GPU_USER=""
-  MLMAN_DEFAULT_GPU1_USER=""
-  MLMAN_DEFAULT_GPU2_USER=""
-
+reset_gpu_node_maps() {
   MLMAN_GPU_NODE_NAMES=()
   MLMAN_ENABLED_GPU_NODE_NAMES=()
   MLMAN_GPU_NODE_IP_BY_NAME=()
@@ -157,6 +119,18 @@ load_mlman_json_config() {
   MLMAN_GPU_NODE_CORES_BY_NAME=()
   MLMAN_GPU_NODE_GPU_COUNT_BY_NAME=()
   MLMAN_GPU_NODE_ENABLED_BY_NAME=()
+}
+
+parse_gpu_nodes_from_json() {
+  local config_path="$1"
+
+  MLMAN_DEFAULT_GPU1_IP=""
+  MLMAN_DEFAULT_GPU2_IP=""
+  MLMAN_DEFAULT_GPU_USER=""
+  MLMAN_DEFAULT_GPU1_USER=""
+  MLMAN_DEFAULT_GPU2_USER=""
+
+  reset_gpu_node_maps
 
   while IFS=$'\t' read -r node_name node_ip node_user node_memory node_cores node_gpu_count node_enabled; do
     [[ -z "${node_name}" ]] && continue
@@ -182,13 +156,16 @@ load_mlman_json_config() {
         (.gpu_count // 2),
         (if (.enabled // true) then "true" else "false" end)
       ] | @tsv
-    ' "${MLMAN_CONFIG_JSON}"
+    ' "${config_path}"
   )
 
   if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -eq 0 ]]; then
+    resolve_gpu_defaults_from_common_user
     seed_default_gpu_nodes
   fi
+}
 
+finalize_legacy_gpu_aliases() {
   # Compatibility aliases for legacy code paths.
   if [[ "${#MLMAN_GPU_NODE_NAMES[@]}" -ge 1 ]]; then
     VM_GPU_1_NAME="${MLMAN_GPU_NODE_NAMES[0]}"
@@ -212,7 +189,9 @@ load_mlman_json_config() {
     VM_GPU_2_MEMORY_MIB="90112"
     VM_GPU_2_CORES="96"
   fi
+}
 
+compute_vm_memory_limit_if_needed() {
   if [[ "${VM_MEMORY_LIMIT_MIB}" == "0" ]]; then
     local mem_sum=0
     local n
@@ -228,6 +207,80 @@ load_mlman_json_config() {
     mem_sum=$((mem_sum + VM_TRAIN_MEMORY_MIB + VM_INFER_MEMORY_MIB))
     VM_MEMORY_LIMIT_MIB="${mem_sum}"
   fi
+}
+
+load_mlman_host_json_config() {
+  load_shared_config_defaults
+  MLMAN_ACTIVE_CONFIG_JSON="${MLMAN_CONFIG_JSON}"
+
+  if [[ ! -f "${MLMAN_CONFIG_JSON}" ]]; then
+    resolve_gpu_defaults_from_common_user
+    seed_default_gpu_nodes
+    return 0
+  fi
+
+  require_json_config_tools
+  validate_json_config "${MLMAN_CONFIG_JSON}"
+
+  ML_MODE_STATE_DIR="$(jq -r '.control.state_dir // "/var/lib/mlman"' "${MLMAN_CONFIG_JSON}")"
+  ML_MODE_LOG_DIR="$(jq -r '.control.log_dir // "/var/log/mlman"' "${MLMAN_CONFIG_JSON}")"
+  ML_CONTROL_ROOT="$(jq -r '.control.root // "/mnt/shared-storage/mlshare/control"' "${MLMAN_CONFIG_JSON}")"
+  ML_CONTROL_LOCK_TIMEOUT_SEC="$(jq -r '.control.lock_timeout_sec // 60' "${MLMAN_CONFIG_JSON}")"
+  ML_INFER_SSH_USER="$(jq -r '.control.infer_ssh_user // "root"' "${MLMAN_CONFIG_JSON}")"
+  ML_INFER_SSH_HOST="$(jq -r '.control.infer_ssh_host // empty' "${MLMAN_CONFIG_JSON}")"
+  ML_INFERCTL_PATH="$(jq -r '.control.inferctl_path // "/usr/local/sbin/inferctl.sh"' "${MLMAN_CONFIG_JSON}")"
+  ML_INFER_CONFIG_PATH_REMOTE="$(jq -r '.control.infer_config_path // "/etc/mlman/infer.conf"' "${MLMAN_CONFIG_JSON}")"
+  ML_SSH_CONNECT_TIMEOUT_SEC="$(jq -r '.control.ssh_connect_timeout_sec // 10' "${MLMAN_CONFIG_JSON}")"
+
+  VM_TRAIN_NAME="$(jq -r '.vm_names.train // "vm-train"' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_NAME="$(jq -r '.vm_names.infer // "vm-infer"' "${MLMAN_CONFIG_JSON}")"
+  VM_TRAIN_MEMORY_MIB="$(jq -r '.profiles.train.memory_mib // 34816' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_MEMORY_MIB="$(jq -r '.profiles.infer.memory_mib // 16384' "${MLMAN_CONFIG_JSON}")"
+  VM_TRAIN_CORES="$(jq -r '.profiles.train.cores // 24' "${MLMAN_CONFIG_JSON}")"
+  VM_INFER_CORES="$(jq -r '.profiles.infer.cores // 16' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_CPU_TYPE="$(jq -r '.resource_defaults.cpu // "host"' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_SOCKETS="$(jq -r '.resource_defaults.sockets // 1' "${MLMAN_CONFIG_JSON}")"
+  VM_DEFAULT_NUMA="$(jq -r '.resource_defaults.numa // 1' "${MLMAN_CONFIG_JSON}")"
+
+  HOST_RESERVED_MIB="$(jq -r '.limits.host_reserved_mib // 30720' "${MLMAN_CONFIG_JSON}")"
+  VM_MEMORY_LIMIT_MIB="$(jq -r '.limits.vm_memory_limit_mib // 0' "${MLMAN_CONFIG_JSON}")"
+
+  parse_gpu_nodes_from_json "${MLMAN_CONFIG_JSON}"
+  finalize_legacy_gpu_aliases
+  compute_vm_memory_limit_if_needed
+}
+
+load_infer_json_config() {
+  load_shared_config_defaults
+  MLMAN_ACTIVE_CONFIG_JSON="${INFER_CONFIG_JSON}"
+
+  if [[ ! -f "${INFER_CONFIG_JSON}" ]]; then
+    resolve_gpu_defaults_from_common_user
+    seed_default_gpu_nodes
+    return 0
+  fi
+
+  require_json_config_tools
+  validate_json_config "${INFER_CONFIG_JSON}"
+
+  ML_SSH_CONNECT_TIMEOUT_SEC="$(jq -r '.control.ssh_connect_timeout_sec // 10' "${INFER_CONFIG_JSON}")"
+
+  MLMAN_DEFAULT_NET_IF="$(jq -r '.inference.net_if // "eth0"' "${INFER_CONFIG_JSON}")"
+  MLMAN_RAY_HEAD_NODE="$(jq -r '.inference.ray_head_node // empty' "${INFER_CONFIG_JSON}")"
+  VENV_PATH="$(jq -r '.inference.venv_path // "~/venv-vllm"' "${INFER_CONFIG_JSON}")"
+  HF_HOME="$(jq -r '.inference.hf_home // "/mnt/shared/models/.hf"' "${INFER_CONFIG_JSON}")"
+  HUGGINGFACE_HUB_CACHE="$(jq -r '.inference.huggingface_hub_cache // "/mnt/shared/models/.hf/hub"' "${INFER_CONFIG_JSON}")"
+  TRANSFORMERS_CACHE="$(jq -r '.inference.transformers_cache // "/mnt/shared/models/.hf/transformers"' "${INFER_CONFIG_JSON}")"
+  VLLM_DOWNLOAD_DIR="$(jq -r '.inference.vllm_download_dir // "/mnt/shared/models/.vllm"' "${INFER_CONFIG_JSON}")"
+  INFER_LOG_DIR="$(jq -r '.inference.infer_log_dir // "/mnt/shared/logs/infer"' "${INFER_CONFIG_JSON}")"
+  RAY_PORT="$(jq -r '.inference.ray_port // 6379' "${INFER_CONFIG_JSON}")"
+  RAY_DASHBOARD_PORT="$(jq -r '.inference.ray_dashboard_port // 8265' "${INFER_CONFIG_JSON}")"
+  VLLM_PORT="$(jq -r '.inference.vllm_port // 8000' "${INFER_CONFIG_JSON}")"
+  VLLM_HEALTHCHECK_RETRIES="$(jq -r '.inference.vllm_healthcheck_retries // 30' "${INFER_CONFIG_JSON}")"
+  VLLM_HEALTHCHECK_INTERVAL_SEC="$(jq -r '.inference.vllm_healthcheck_interval_sec // 2' "${INFER_CONFIG_JSON}")"
+
+  parse_gpu_nodes_from_json "${INFER_CONFIG_JSON}"
+  finalize_legacy_gpu_aliases
 }
 
 get_gpu_node_ip() {
@@ -276,7 +329,18 @@ get_ray_head_node_name() {
   printf "\n"
 }
 
-load_mlman_json_config
+case "${MLMAN_CONFIG_ROLE}" in
+  host)
+    load_mlman_host_json_config
+    ;;
+  infer)
+    load_infer_json_config
+    ;;
+  *)
+    echo "error: unknown MLMAN_CONFIG_ROLE: ${MLMAN_CONFIG_ROLE}" >&2
+    exit 1
+    ;;
+esac
 
 ML_MODE_STATE_FILE="${ML_MODE_STATE_FILE:-${ML_MODE_STATE_DIR}/state.env}"
 ML_MODE_POLICY_LOG="${ML_MODE_POLICY_LOG:-${ML_MODE_LOG_DIR}/policy.log}"
@@ -478,11 +542,18 @@ current_runtime_mode() {
 
 inferctl_exec() {
   local target="${ML_INFER_SSH_USER}@${ML_INFER_SSH_HOST}"
+  local remote_infer_config="${ML_INFER_CONFIG_PATH_REMOTE:-/etc/mlman/infer.conf}"
+  local remote_cmd=""
+  local arg
   command -v ssh >/dev/null 2>&1 || {
     echo "error: ssh not found; cannot reach vm-infer control plane" >&2
     return 1
   }
-  ssh -o BatchMode=yes -o ConnectTimeout="${ML_SSH_CONNECT_TIMEOUT_SEC}" "${target}" "$@"
+  for arg in "$@"; do
+    remote_cmd+=" $(printf '%q' "${arg}")"
+  done
+  ssh -o BatchMode=yes -o ConnectTimeout="${ML_SSH_CONNECT_TIMEOUT_SEC}" "${target}" \
+    "INFER_CONFIG_JSON=$(printf '%q' "${remote_infer_config}")${remote_cmd}"
 }
 
 stop_vm_graceful_then_force() {

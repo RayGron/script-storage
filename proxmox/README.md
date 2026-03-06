@@ -8,7 +8,8 @@ This directory now has two parts:
 ## Architecture Assumed by Audit Scripts
 
 - Proxmox host with GPU passthrough
-- JSON config at `/etc/mlman/mlman.conf`
+- Host config at `/etc/mlman/mlman.conf`
+- Inference config at `/etc/mlman/infer.conf` on `vm-infer`
 - Dynamic GPU VM list from `gpu_nodes[]`
 - Control VMs from config `vm_names.train` and `vm_names.infer`
 - Shared data root on host: `/mnt/shared-storage/mlshare`
@@ -37,4 +38,4 @@ chmod +x proxmox/audit/*.sh
 ./proxmox/audit/gpu-test.sh
 ```
 
-All audit scripts source `watchdog/ml-mode-common.sh`, so they read VM names, resources, and node inventory from `/etc/mlman/mlman.conf` by default.
+All audit scripts source `watchdog/ml-mode-common.sh`, so they read host-side VM names, resources, and node inventory from `/etc/mlman/mlman.conf`.

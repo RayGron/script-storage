@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MLMAN_CONFIG_ROLE="infer"
 COMMON_SCRIPT="${SCRIPT_DIR}/ml-mode-common.sh"
 if [[ ! -f "${COMMON_SCRIPT}" ]]; then
   COMMON_SCRIPT="/usr/local/sbin/ml-mode-common.sh"
@@ -17,7 +18,7 @@ Usage:
   inferctl.sh stop [--nodes <name1,name2,...>] [--head-node <name>] [--net-if <iface>]
 
 Node defaults are loaded from:
-  ${MLMAN_CONFIG_JSON}
+  ${INFER_CONFIG_JSON}
 EOF
 }
 
@@ -81,7 +82,7 @@ resolve_target_nodes() {
 
   parse_nodes_csv "${nodes_csv}"
   if [[ "${#SELECTED_GPU_NODES[@]}" -eq 0 ]]; then
-    echo "error: no GPU nodes selected (check ${MLMAN_CONFIG_JSON})" >&2
+    echo "error: no GPU nodes selected (check ${INFER_CONFIG_JSON})" >&2
     exit 2
   fi
 
@@ -105,11 +106,11 @@ validate_selected_nodes_runtime() {
     node_ip="$(get_gpu_node_ip "${node_name}")"
     node_user="$(get_gpu_node_user "${node_name}")"
     if [[ -z "${node_ip}" ]]; then
-      echo "error: missing IP for GPU node '${node_name}' in ${MLMAN_CONFIG_JSON}" >&2
+      echo "error: missing IP for GPU node '${node_name}' in ${INFER_CONFIG_JSON}" >&2
       exit 2
     fi
     if [[ -z "${node_user}" ]]; then
-      echo "error: missing ssh_user for GPU node '${node_name}' in ${MLMAN_CONFIG_JSON}" >&2
+      echo "error: missing ssh_user for GPU node '${node_name}' in ${INFER_CONFIG_JSON}" >&2
       exit 2
     fi
   done
